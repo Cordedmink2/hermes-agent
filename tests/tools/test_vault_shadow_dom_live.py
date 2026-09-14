@@ -240,7 +240,7 @@ def test_shadow_probes_inspection_nonce_and_events_share_scope(browser):
     # Open-shadow traversal must not cross into an iframe document.
     evaluate(
         supervisor,
-        """document.body.innerHTML = '<iframe srcdoc=\"<input type=password>\"></iframe>'; 
+        """document.body.innerHTML = '<iframe srcdoc=\"<input type=password>\"></iframe>';
           document.querySelector('iframe').contentDocument.body.innerHTML = '<input type=password>'""",
     )
     assert evaluate(supervisor, vault._TAB_PROBES["login"]) is False
