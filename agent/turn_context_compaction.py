@@ -141,6 +141,30 @@ def run_turn_start_compaction(
     return out
 
 
+def _idle_gap_seconds(agent: Any) -> float:
+    """Wall-clock seconds since the session's last model activity, as the idle trigger sees it.
+
+    ``_last_activity_ts`` alone cannot be the clock: turn admission (the durable turn lease,
+    the gateway's cached-agent reset) stamps it to *now* before the prologue runs, and a
+    freshly spawned process (CLI ``--resume``, gateway restart) initialises it to now. The
+    durable timestamp of the newest assistant/tool row is the real "cache last warmed" point;
+    the in-memory clock is the fallback when there is no session DB or no such row yet.
+    """
+    now = time.time()
+    db = getattr(agent, "_session_db", None)
+    sid = getattr(agent, "session_id", None)
+    reader = getattr(db, "latest_model_activity_ts", None) if db is not None and sid else None
+    if callable(reader):
+        try:
+            ts = reader(sid)
+        except Exception:
+            logger.debug("idle clock: session DB read failed", exc_info=True)
+            ts = None
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and 0 < ts <= now:
+            return now - ts
+    return now - getattr(agent, "_last_activity_ts", now)
+
+
 def _idle_compaction(
     agent: Any, out: CompactionOutcome, system_message: Optional[str], user_message: Any,
     effective_task_id: str,
@@ -153,7 +177,7 @@ def _idle_compaction(
     _idle_after = getattr(agent, "compression_idle_compact_after_seconds", 0)
     if not (agent.compression_enabled and _idle_after > 0 and messages):
         return
-    _idle_gap = time.time() - getattr(agent, "_last_activity_ts", time.time())
+    _idle_gap = _idle_gap_seconds(agent)
     if _idle_gap < _idle_after:
         return
     _compressor = agent.context_compressor
