@@ -66,7 +66,7 @@ jobs:
       - name: Run Windows install + update E2E
         shell: bash
         run: |
-          scripts/run_tests.sh tests/e2e/core/windows_update/ -- \
+          scripts/run_tests.sh tests/e2e/core/windows_update/test_crash_cells.py -- \
             -m "platforms and integration" -v --tb=short -rA
         env:
           HERMES_E2E_WINDOWS_INSTALL: '1'

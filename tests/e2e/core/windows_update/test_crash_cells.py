@@ -358,6 +358,11 @@ def _crash(machine, srv, label: str, start, point, hold: _GitHold | None = None,
             if hold is not None:
                 hold.disarm()
         index_lock_after_kill = leftover.is_file()
+        if label == "mid-fetch" and not index_lock_after_kill:
+            # PROOF ONLY (never merge, #133077): run 37573293632 showed this cell's kill can strand
+            # .git/index.lock; leave the 0-byte lock a killed git leaves so every run takes that path.
+            leftover.write_bytes(b"")
+            machine.timings.append(("(proof: planted a dead git's .git/index.lock after the mid-fetch kill)", 0.0))
         tree_after_kill = _tree(machine, label)
         held_missing_after_kill = hold is not None and not (machine.install_dir / hold.path).exists()
         turn = one_shot_turn(machine, srv, f"{label}-next-launch")
