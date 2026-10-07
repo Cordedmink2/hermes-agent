@@ -71,6 +71,22 @@ class ContextEngine(ABC):
     # False keeps successful automatic compaction passes silent (routine background
     # maintenance); warnings, errors and manual /compress still surface.
     emit_automatic_compaction_status: bool = True
+    # Turn-start (idle/preflight) contract. The host reads these on EVERY engine, so
+    # the ABC carries neutral defaults; engines that track them override per instance.
+    # summary_target_ratio: post-compaction size as a fraction of threshold_tokens (the
+    #   idle trigger's "already small enough" floor).
+    # last_compression_rough_tokens: rough size the previous pass produced (0 = unknown).
+    # awaiting_real_usage_after_compression: True defers local compaction until the
+    #   next real provider usage report arrives.
+    # last_real_prompt_tokens: last provider-reported prompt size (diagnostics only).
+    summary_target_ratio: float = 0.20
+    last_compression_rough_tokens: int = 0
+    awaiting_real_usage_after_compression: bool = False
+    last_real_prompt_tokens: int = 0
+
+    def get_active_compression_failure_cooldown(self, *, refresh: bool = False) -> Optional[Dict[str, Any]]:
+        """Active summary-failure cooldown record, or ``None`` (the default: no cooldown)."""
+        return None
 
     @abstractmethod
     def update_from_response(self, usage: Dict[str, Any]) -> None:
