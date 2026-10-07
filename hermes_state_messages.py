@@ -703,6 +703,19 @@ class SessionMessagesMixin:
             (session_id, role, int(offset)))
         return row[0] if row else None
 
+    def latest_model_activity_ts(self, session_id: str) -> Optional[float]:
+        """Timestamp of the newest active assistant/tool row, or ``None``.
+
+        The idle-compaction clock: those rows are written by provider round-trips, so this is
+        the last time the session's prompt prefix was sent (and cached). Durable across process
+        restarts and immune to the turn-entry activity stamp."""
+        if not session_id:
+            return None
+        row = self._read_one(
+            "SELECT MAX(timestamp) FROM messages WHERE session_id = ? AND active = 1 "
+            "AND role IN ('assistant', 'tool')", (session_id,))
+        return float(row[0]) if row and row[0] is not None else None
+
     def latest_conversation_role(self, session_id: str) -> Optional[str]:
         """Role of the newest active user/assistant/tool row, or ``None``. ``session_meta`` /
         ``system`` rows are transcript bookkeeping stripped before the model sees history, so
