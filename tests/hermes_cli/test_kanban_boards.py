@@ -205,8 +205,14 @@ class TestBoardCRUD:
         # connect() gets a fresh schema-init pass.
         assert str(db_path.resolve()) not in kb._INITIALIZED_PATHS
 
-        # Simulate the event-stream poll: re-open the same slug. connect()
-        # recreates the directory + empty .db; the schema must be re-applied.
+        # A poll that re-opens the removed slug must NOT resurrect it as a
+        # phantom board (dir + empty DB, no board.json).
+        with pytest.raises(kb.BoardNotFoundError):
+            kbc.connect(board="recycle")
+        assert not kb.board_dir("recycle").exists()
+
+        # Explicitly re-creating the board gets a fresh schema-init pass.
+        kb.create_board("recycle")
         with kbc.connect_closing(board="recycle") as conn:
             tables = {
                 row[0]
@@ -217,6 +223,87 @@ class TestBoardCRUD:
         assert "task_events" in tables
         assert "tasks" in tables
 
+
+
+# ---------------------------------------------------------------------------
+# Lookup of a missing board never creates it (phantom-board regression)
+# ---------------------------------------------------------------------------
+
+class TestMissingBoardIsNotCreated:
+    """Regression: a cron agent called ``kanban_list(board="autonomous-program-2026-10")``
+    (an artefact-dir name, not a board). ``connect(board=)`` did ``mkdir`` + schema
+    init, leaving ``boards/<slug>/kanban.db`` with no ``board.json`` — a phantom
+    board that ``board_exists()``/``list_boards()`` then reported as real. Only
+    ``create_board`` (which writes ``board.json`` first) may bring a board into being."""
+
+    def test_connect_unknown_board_raises_and_creates_nothing(self, fresh_home):
+        with pytest.raises(kb.BoardNotFoundError):
+            kbc.connect(board="no-such-board")
+        assert not kb.board_dir("no-such-board").exists()
+        assert not kb.board_exists("no-such-board")
+        assert [b["slug"] for b in kb.list_boards()] == ["default"]
+
+    def test_board_not_found_is_a_value_error(self):
+        # Tool handlers render ValueError as a clean structured error.
+        assert issubclass(kb.BoardNotFoundError, ValueError)
+
+    def test_connect_closing_unknown_board_raises(self, fresh_home):
+        with pytest.raises(kb.BoardNotFoundError):
+            with kbc.connect_closing(board="ghost"):
+                pass
+        assert not kb.board_dir("ghost").exists()
+
+    def test_init_db_unknown_board_raises_and_creates_nothing(self, fresh_home):
+        with pytest.raises(kb.BoardNotFoundError):
+            kb.init_db(board="ghost")
+        assert not kb.board_dir("ghost").exists()
+
+    def test_default_board_still_auto_initializes(self, fresh_home):
+        with kbc.connect_closing(board="default") as conn:
+            kb.create_task(conn, title="t", assignee="x")
+        assert (fresh_home / "kanban.db").exists()
+
+    def test_create_board_still_creates_db(self, fresh_home):
+        kb.create_board("real")
+        assert (kb.board_dir("real") / "kanban.db").exists()
+        assert (kb.board_dir("real") / "board.json").exists()
+        with kbc.connect_closing(board="real") as conn:
+            assert kb.list_tasks(conn) == []
+
+    def test_board_with_metadata_but_no_db_initializes(self, fresh_home):
+        # board.json is the declaration of a board; a missing DB is (re)created.
+        kb.write_board_metadata("declared", name="Declared")
+        with kbc.connect_closing(board="declared") as conn:
+            assert kb.list_tasks(conn) == []
+        assert (kb.board_dir("declared") / "kanban.db").exists()
+
+    def test_legacy_board_with_db_but_no_metadata_still_opens(self, fresh_home):
+        kb.create_board("legacy")
+        (kb.board_dir("legacy") / "board.json").unlink()
+        kb._INITIALIZED_PATHS.clear()
+        with kbc.connect_closing(board="legacy") as conn:
+            assert kb.list_tasks(conn) == []
+
+    def test_explicit_db_path_still_creates(self, fresh_home, tmp_path):
+        p = tmp_path / "elsewhere" / "kanban.db"
+        with kbc.connect_closing(db_path=p) as conn:
+            assert kb.list_tasks(conn) == []
+        assert p.exists()
+
+    def test_env_pinned_db_still_creates(self, fresh_home, tmp_path, monkeypatch):
+        p = tmp_path / "pinned" / "kanban.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(p))
+        with kbc.connect_closing() as conn:
+            assert kb.list_tasks(conn) == []
+        assert p.exists()
+
+    def test_kanban_list_tool_unknown_board_is_error_not_phantom(self, fresh_home, monkeypatch):
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        from tools import kanban_tools as kt
+        out = json.loads(kt._handle_list({"board": "autonomous-program-2026-10", "limit": 50}))
+        assert out.get("error"), out
+        assert "does not exist" in out["error"]
+        assert not kb.board_dir("autonomous-program-2026-10").exists()
 
 
 # ---------------------------------------------------------------------------
