@@ -522,6 +522,43 @@ def _dir_holds_board(d: Path) -> bool:
     return (d / "board.json").exists() or (d / "kanban.db").exists()
 
 
+class BoardNotFoundError(ValueError):
+    """A named board was opened that was never created.
+
+    ``ValueError`` so tool handlers / CLI render it as a plain user error."""
+
+
+def require_existing_board_db(path: Path) -> None:
+    """Refuse to bring a named board into being as a side effect of opening it.
+
+    ``connect()`` / ``init_db()`` create their DB file on demand. For a path
+    resolved to ``<boards_root>/<slug>/kanban.db`` that used to mean any lookup
+    of a typo'd or wrong slug (e.g. ``kanban_list(board="<artefact dir>")``)
+    left a phantom board: a fresh ``kanban.db`` with no ``board.json`` that
+    ``board_exists()`` / ``list_boards()`` then reported as real. A named board
+    exists only once :func:`create_board` (or an import) has written
+    ``board.json``; legacy boards that only have a ``kanban.db`` keep working.
+    Paths outside ``boards_root()`` (``default``, explicit ``db_path``, test
+    pins) are unaffected.
+    """
+    try:
+        parent = Path(path).expanduser().absolute().parent
+        root = boards_root().expanduser().absolute()
+    except OSError:
+        return
+    if parent.parent != root:
+        return
+    if parent.name == DEFAULT_BOARD or parent.name.startswith("_"):
+        return
+    if _dir_holds_board(parent):
+        return
+    raise BoardNotFoundError(
+        f"board {parent.name!r} does not exist (no board.json). Use "
+        f"`hermes kanban boards list` to see boards, or `hermes kanban boards "
+        f"create {parent.name}` to create it deliberately."
+    )
+
+
 def _explicit_board_slug(board: Optional[str]) -> Optional[str]:
     """Explicit caller intent: a direct ``board=`` argument, else the scoped
     ``--board`` context (CLI ``hermes kanban --board``, dashboard plugin_api);
