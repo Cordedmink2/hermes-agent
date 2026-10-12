@@ -2,6 +2,7 @@
 whether any text was printed (#111770 — an incomplete or failed run that left an explanation on
 stdout used to exit 0, so scripts treated a half-done job as success)."""
 
+import logging
 from unittest import mock
 
 import hermes_cli.oneshot as oneshot
@@ -13,6 +14,29 @@ def _run(monkeypatch, tmp_path, response, result):
     with mock.patch.object(oneshot, "_run_agent", return_value=(response, dict(result))):
         code = oneshot.run_oneshot("q", usage_file=str(usage))
     return code, usage
+
+
+def test_oneshot_does_not_globally_disable_file_logging(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    log_path = tmp_path / "errors.log"
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    root = logging.getLogger()
+    prior_disable = root.manager.disable
+    root.addHandler(handler)
+    try:
+        def _log_from_agent(*args, **kwargs):
+            logging.error("expected plugin traceback")
+            return "", {"completed": False}
+
+        with mock.patch.object(oneshot, "_run_agent", side_effect=_log_from_agent):
+            oneshot.run_oneshot("q")
+        handler.flush()
+        assert "expected plugin traceback" in log_path.read_text(encoding="utf-8")
+        assert root.manager.disable == prior_disable
+    finally:
+        root.removeHandler(handler)
+        handler.close()
+        logging.disable(prior_disable)
 
 
 def test_incomplete_run_with_text_exits_nonzero_and_reports_why(monkeypatch, tmp_path):

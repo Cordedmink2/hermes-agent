@@ -252,9 +252,8 @@ def run_oneshot(
     the CLI layer: latest/title/--continue resolution) whose transcript is loaded and continued
     by this turn. Returns the exit code; the caller owns process termination.
     """
-    # Silence every stdlib logger: AIAgent, tools and provider adapters log to stderr through the
-    # root logger. File handlers from setup_logging() keep working (level-independent).
-    logging.disable(logging.CRITICAL)
+    # stdout/stderr are redirected for one-shot output; do not globally disable logging because
+    # process-wide disable also suppresses records destined for configured file handlers.
 
     # --provider without --model is ambiguous (the provider may not host the configured model, and
     # picking its catalog default hides the mismatch). Validate BEFORE the stderr redirect.
