@@ -221,3 +221,43 @@ def test_cleanup_workspace_keeps_scratch_when_other_boards_cannot_be_listed(boar
         kbw._cleanup_workspace(conn, archived)
         assert _deferred_reasons(conn, archived) == ["shared", "shared", "unknown"]
     assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"
+
+
+def test_stray_db_in_archived_dir_does_not_block_cleanup(board):
+    """``boards/_archived/`` holds archived boards, not a board. A stray empty
+    ``_archived/kanban.db`` (e.g. a ``sqlite3`` CLI loop over ``boards/*``)
+    has no ``tasks`` table; scanning it made every completion defer cleanup
+    with reason ``unknown``. A broken *real* board still fails closed."""
+    from hermes_cli import kanban_db_workspace as kbw
+
+    stray = kb.boards_root() / "_archived" / "kanban.db"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"")
+
+    def finished_scratch(name: str) -> tuple[str, Path]:
+        ws = kb.workspaces_root() / name
+        ws.mkdir(parents=True)
+        (ws / "work.txt").write_text("done", encoding="utf-8")
+        with kbc.connect_closing() as conn:
+            tid = kb.create_task(conn, title=name)
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET status='done', workspace_kind='scratch', "
+                    "workspace_path=? WHERE id=?",
+                    (str(ws), tid),
+                )
+        return tid, ws
+
+    tid, ws = finished_scratch("finished")
+    with kbc.connect_closing() as conn:
+        kbw._cleanup_workspace(conn, tid)
+        assert _deferred_reasons(conn, tid) == []
+    assert not ws.exists()
+
+    kb.create_board("real")
+    (kb.boards_root() / "real" / "kanban.db").write_bytes(b"")
+    tid, ws = finished_scratch("finished-2")
+    with kbc.connect_closing() as conn:
+        kbw._cleanup_workspace(conn, tid)
+        assert _deferred_reasons(conn, tid) == ["unknown"]
+    assert (ws / "work.txt").exists()
