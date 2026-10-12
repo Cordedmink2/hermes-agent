@@ -118,6 +118,11 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     slug onto the pinned file, so the scan uses the on-disk layout: the
     default board at ``<home>/kanban.db`` and named boards at
     ``<home>/kanban/boards/<slug>/kanban.db``.
+
+    Only directories named like a board slug count. ``_archived/`` (where
+    ``remove_board`` parks old boards) and other non-slug dirs are not boards;
+    a stray ``kanban.db`` in one of them, e.g. an empty file an external
+    ``sqlite3`` CLI call created, must not make every cleanup fail closed.
     """
     from hermes_cli.kanban_db_connect import _main_db_file  # late: import cycle
 
@@ -127,7 +132,7 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     root = _kb.boards_root()
     if root.is_dir():
         for child in root.iterdir():
-            if child.is_dir():
+            if child.is_dir() and _kb._BOARD_SLUG_RE.fullmatch(child.name):
                 candidates.append(child / "kanban.db")
     found: list[Path] = []
     seen: set[Path] = set()
