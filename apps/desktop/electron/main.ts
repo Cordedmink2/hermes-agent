@@ -474,6 +474,8 @@ import { PrimaryProfilePin, resolveLaunchProfile } from './primary-profile-pin'
 import { applyDesktopIdentity, PRODUCT_IDENTITY } from './product-identity'
 import {
   assertLocalProfileCanStart,
+  namedProfileIsLive,
+  type ProfileLivenessFs,
   decideProfileDeleteAction,
   dispatchConnectionScopedProfileDelete,
   localProfilePoolKeys,
@@ -2969,6 +2971,21 @@ function directoryExists(filePath) {
   } catch {
     return false
   }
+}
+
+const PROFILE_LIVENESS_FS: ProfileLivenessFs = {
+  isDirectory: directoryExists,
+  isFileOrSymlink: filePath => {
+    try {
+      const stat = fs.lstatSync(filePath)
+
+      return stat.isSymbolicLink() || stat.isFile()
+    } catch {
+      return false
+    }
+  },
+  exists: filePath => fs.existsSync(filePath),
+  join: (...parts) => path.join(...parts)
 }
 
 // --- in-app update mutual exclusion (#50238) -------------------------------
@@ -12219,7 +12236,7 @@ async function runPoolBackendStart(
   // and no exit — the exact undiagnosable burst signature in remote-gateway
   // user bundles (Aug 2026, Dash's report).
   assertLocalProfileCanStart(profile, profileDeletionGate, key =>
-    directoryExists(path.join(HERMES_HOME, 'profiles', key))
+    namedProfileIsLive(path.join(HERMES_HOME, 'profiles'), key, PROFILE_LIVENESS_FS)
   )
   rememberLog(`Starting Hermes backend for profile "${profile}" via ${backend.label}`)
 

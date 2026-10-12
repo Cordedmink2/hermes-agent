@@ -7,6 +7,8 @@ import {
   decideProfileDeleteAction,
   dispatchConnectionScopedProfileDelete,
   localProfilePoolKeys,
+  namedProfileIsLive,
+  PROFILE_IDENTITY_MARKERS,
   ProfileDeletionGate,
   profileNameFromDeleteRequest,
   resolveRouteProfile
@@ -318,4 +320,41 @@ test('connection-scoped invalid-name DELETE rejects before gate, preparation, te
   )
 
   assert.deepEqual(events, [])
+})
+
+// ---------------------------------------------------------------------------
+// namedProfileIsLive — mirrors hermes_constants.named_profile_is_live
+// ---------------------------------------------------------------------------
+
+function fakeFs(files: string[], dirs: string[]) {
+  const all = new Set([...files, ...dirs])
+
+  return {
+    isDirectory: (p: string) => dirs.includes(p),
+    isFileOrSymlink: (p: string) => files.includes(p),
+    exists: (p: string) => all.has(p),
+    join: (...parts: string[]) => parts.join('/')
+  }
+}
+
+test('namedProfileIsLive rejects a marker-less shell (logs/ left by a closing SessionDB)', () => {
+  const fsx = fakeFs(['/p/mackie/logs/errors.log'], ['/p/mackie', '/p/mackie/logs'])
+
+  assert.equal(namedProfileIsLive('/p', 'mackie', fsx), false)
+  assert.throws(
+    () => assertLocalProfileCanStart('mackie', new ProfileDeletionGate(), key => namedProfileIsLive('/p', key, fsx)),
+    /Profile "mackie" no longer exists/
+  )
+})
+
+test('namedProfileIsLive accepts any identity marker and refuses a tombstoned profile', () => {
+  for (const marker of PROFILE_IDENTITY_MARKERS) {
+    assert.equal(namedProfileIsLive('/p', 'bot', fakeFs([`/p/bot/${marker}`], ['/p/bot'])), true, marker)
+  }
+
+  assert.equal(
+    namedProfileIsLive('/p', 'bot', fakeFs(['/p/bot/config.yaml', '/p/.deleted/bot'], ['/p/bot', '/p/.deleted'])),
+    false
+  )
+  assert.equal(namedProfileIsLive('/p', 'gone', fakeFs([], [])), false)
 })

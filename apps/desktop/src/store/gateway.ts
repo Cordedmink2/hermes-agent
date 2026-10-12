@@ -1084,7 +1084,10 @@ function isMissingConnectionError(error: unknown): boolean {
 function isMissingProfileError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? '')
 
-  return message.includes('no longer exists') || message.includes('is being deleted')
+  // The last clause is the backend's own refusal (hermes_cli.profiles
+  // _missing_profile_error) surfacing in the before-ready exit message — a
+  // spawn that slipped past the guard is just as permanent.
+  return message.includes('no longer exists') || message.includes('is being deleted') || /Profile '[^']+' does not exist/.test(message)
 }
 
 function createSecondary(profile: string, connectionId: null | string = null): Secondary {

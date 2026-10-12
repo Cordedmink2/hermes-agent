@@ -176,10 +176,49 @@ export class ProfileDeletionGate {
   }
 }
 
+// Mirrors hermes_constants._PROFILE_IDENTITY_MARKERS / _DELETED_PROFILES_DIR.
+// A profiles/<name> dir is a profile only when one of these identifies it and
+// no tombstone marks it deleted — exactly what `--profile` resolution
+// (named_profile_is_live) demands before it will start a backend.
+export const PROFILE_IDENTITY_MARKERS = ['config.yaml', '.env', 'SOUL.md', 'profile.yaml', 'auth.json', 'state.db']
+export const DELETED_PROFILES_DIR = '.deleted'
+
+export interface ProfileLivenessFs {
+  isDirectory: (filePath: string) => boolean
+  /** True for a regular file OR a symlink (dangling links still claim identity). */
+  isFileOrSymlink: (filePath: string) => boolean
+  exists: (filePath: string) => boolean
+  join: (...parts: string[]) => string
+}
+
+/**
+ * Same predicate as the backend's named_profile_is_live. A bare directory is
+ * NOT enough: runtime side-effects (a gateway closing the profile's SessionDB
+ * writes logs/errors.log, cron heartbeats, caches) recreate a marker-less
+ * shell after the profile was archived or deleted. Treating that shell as a
+ * profile let the renderer spawn `--profile X serve` once a second, each
+ * child exiting "Profile 'X' does not exist" — an error the renderer does not
+ * classify as permanent, so it never stopped retrying.
+ */
+export function namedProfileIsLive(profilesRoot: string, key: string, fsx: ProfileLivenessFs): boolean {
+  const home = fsx.join(profilesRoot, key)
+
+  if (!fsx.isDirectory(home)) {
+    return false
+  }
+
+  if (fsx.exists(fsx.join(profilesRoot, DELETED_PROFILES_DIR, key))) {
+    return false
+  }
+
+  return PROFILE_IDENTITY_MARKERS.some(marker => fsx.isFileOrSymlink(fsx.join(home, marker)))
+}
+
 /**
  * Validate the final boundary before spawning a local profile backend. The
- * deletion gate closes the in-flight race; the directory check rejects a
- * delayed renderer retry after the DELETE request has already completed.
+ * deletion gate closes the in-flight race; the liveness check rejects a
+ * delayed renderer retry after the DELETE request has already completed, and
+ * a marker-less ghost shell left behind by runtime side-effects.
  */
 export function assertLocalProfileCanStart(
   profile: unknown,

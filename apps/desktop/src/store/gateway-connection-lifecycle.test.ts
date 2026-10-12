@@ -689,6 +689,39 @@ describe('reconnect fail-stop on a removed connection', () => {
     expect(getConnection.mock.calls.length).toBe(callsAfterFailStop)
   })
 
+  it("fail-stops when the backend itself refuses the profile (\"Profile 'x' does not exist\")", async () => {
+    // A spawn that slipped past the guard (a marker-less ghost dir) dies in
+    // _missing_profile_error; the before-ready exit message carries that line.
+    let connectionCalls = 0
+
+    const getConnection = vi.fn(async () => {
+      connectionCalls += 1
+
+      if (connectionCalls <= 3) {
+        return descriptorFor('legacy-local', 'selena')
+      }
+
+      throw new Error(
+        `Hermes backend for profile "selena" exited before it became ready (1).\nError: Profile 'selena' does not exist. Create it with: hermes profile create selena`
+      )
+    })
+
+    installDesktop({ getConnection })
+
+    await openGatewayForProfile('selena')
+    await ensureGatewayForProfile('selena')
+    connectionCalls = 99
+
+    const socket = gatewayMocks.instances[0] as unknown as { connectionState: string }
+    socket.connectionState = 'closed'
+
+    await ensureActiveGatewayOpen()
+
+    const callsAfterFailStop = getConnection.mock.calls.length
+    await ensureActiveGatewayOpen()
+    expect(getConnection.mock.calls.length).toBe(callsAfterFailStop)
+  })
+
   it('waits out an in-flight secondary activation instead of failing instantly (#88880)', async () => {
     // A remote secondary whose activation is ALREADY in flight from another
     // path (wake sweep, agent activation) used to make ensureActiveGatewayOpen
