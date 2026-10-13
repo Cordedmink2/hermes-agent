@@ -91,6 +91,26 @@ def test_prune_ignores_freshened_hardlinks_shared_with_a_live_repo(tmp_path):
     assert not (scratch / "clone").exists() and live_pack.read_bytes() == b"P" * 64
 
 
+def test_disk_pressure_does_not_reap_processes_for_entries_kept_after_recovery(tmp_path, monkeypatch):
+    import hermes_constants_scratch as scratch_module
+
+    root = tmp_path / "scratch"
+    entries = [root / name for name in ("first", "second")]
+    for entry in entries:
+        entry.mkdir(parents=True)
+        old = time.time() - 3600
+        os.utime(entry, (old, old))
+    reaped = []
+    monkeypatch.setattr(scratch_module, "reap_processes_rooted_in", lambda _root, doomed, *_: reaped.extend(doomed))
+    monkeypatch.setattr(scratch_module.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(
+        100, 90, 10 if entries[0].exists() else 25))
+
+    assert scratch_module.prune_idle_entries(root, 24, frozenset(), free_space_floor_bytes=20,
+                                             pressure_idle_hours=0.5) == 1
+    assert not entries[0].exists() and entries[1].exists()
+    assert reaped == [entries[0]]
+
+
 def test_disk_pressure_uses_shorter_idle_window_and_stops_after_recovery(tmp_path, monkeypatch):
     import hermes_constants_scratch as scratch_module
 
