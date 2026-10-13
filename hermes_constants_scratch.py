@@ -280,10 +280,11 @@ def _prune_idle_entries(
     doomed = candidates
     # Runs even with nothing to delete: orphans whose cwd was removed by an earlier pass
     # (or by hand) are found by the deleted-cwd rule, not by membership in ``doomed``.
-    try:
-        reap_processes_rooted_in(root, doomed, audit)
-    except Exception as exc:  # psutil missing or restricted host: the deletion still proceeds
-        logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
+    if not pressured:
+        try:
+            reap_processes_rooted_in(root, doomed, audit)
+        except Exception as exc:  # psutil missing or restricted host: deletion still proceeds
+            logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
     if not doomed:
         return 0
     repos: set[str] = set()
@@ -295,6 +296,13 @@ def _prune_idle_entries(
                     break
             except OSError:
                 break
+        # Pressure-mode candidates are reaped only once selected for deletion; the normal
+        # retention mode preserves its prior all-candidates reap behaviour above.
+        if pressured:
+            try:
+                reap_processes_rooted_in(root, [entry], audit)
+            except Exception as exc:  # psutil missing or restricted host: deletion proceeds
+                logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
         size = _tree_bytes(entry)
         try:
             if entry.is_dir() and not entry.is_symlink():
