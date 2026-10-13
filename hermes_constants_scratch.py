@@ -242,6 +242,7 @@ def release_git_worktrees(repos: set[str]) -> None:
 
 def prune_idle_entries(
     root: Path, max_idle_hours: float, skip_names: frozenset[str], log_file: Path | None = None,
+    *, free_space_floor_bytes: int = 8 * 1024**3, pressure_idle_hours: float = 0.5,
 ) -> int:
     """Delete top-level entries of *root* with no write anywhere in their subtree for
     *max_idle_hours*, reaping processes and worktree registrations rooted in them first.
@@ -249,7 +250,8 @@ def prune_idle_entries(
     actually removed."""
     audit = _open_prune_log(log_file)
     try:
-        return _prune_idle_entries(root, max_idle_hours, skip_names, audit)
+        return _prune_idle_entries(root, max_idle_hours, skip_names, audit,
+                                   free_space_floor_bytes, pressure_idle_hours)
     finally:
         if audit is not logger:
             for handler in audit.handlers:
@@ -258,24 +260,49 @@ def prune_idle_entries(
 
 def _prune_idle_entries(
     root: Path, max_idle_hours: float, skip_names: frozenset[str], audit: logging.Logger,
+    free_space_floor_bytes: int = 8 * 1024**3, pressure_idle_hours: float = 0.5,
 ) -> int:
-    cutoff = time.time() - max_idle_hours * 3600
+    try:
+        pressured = shutil.disk_usage(root).free < free_space_floor_bytes
+    except OSError:
+        pressured = False
+    idle_hours = min(max_idle_hours, pressure_idle_hours) if pressured else max_idle_hours
+    cutoff = time.time() - idle_hours * 3600
     try:
         entries = [e for e in root.iterdir() if e.name not in skip_names]
     except OSError:
         return 0
-    doomed = [e for e in entries if not subtree_touched_since(e, cutoff)]
+    candidates = [e for e in entries if not subtree_touched_since(e, cutoff)]
+    # Under pressure, recover oldest/largest first and stop as soon as the configured floor
+    # is restored. Recent activity remains an unconditional keep via the cutoff above.
+    if pressured:
+        candidates.sort(key=lambda e: (e.stat().st_mtime, -_tree_bytes(e)))
+    doomed = candidates
     # Runs even with nothing to delete: orphans whose cwd was removed by an earlier pass
     # (or by hand) are found by the deleted-cwd rule, not by membership in ``doomed``.
-    try:
-        reap_processes_rooted_in(root, doomed, audit)
-    except Exception as exc:  # psutil missing or restricted host: the deletion still proceeds
-        logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
+    if not pressured:
+        try:
+            reap_processes_rooted_in(root, doomed, audit)
+        except Exception as exc:  # psutil missing or restricted host: deletion still proceeds
+            logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
     if not doomed:
         return 0
     repos: set[str] = set()
     removed = 0
     for entry in doomed:
+        if pressured:
+            try:
+                if shutil.disk_usage(root).free >= free_space_floor_bytes:
+                    break
+            except OSError:
+                break
+        # Pressure-mode candidates are reaped only once selected for deletion; the normal
+        # retention mode preserves its prior all-candidates reap behaviour above.
+        if pressured:
+            try:
+                reap_processes_rooted_in(root, [entry], audit)
+            except Exception as exc:  # psutil missing or restricted host: deletion proceeds
+                logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
         size = _tree_bytes(entry)
         try:
             if entry.is_dir() and not entry.is_symlink():
