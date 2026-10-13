@@ -42,6 +42,13 @@ database:
 runtime:
   nofile_soft_limit: 4096
 
+# Scratch-cache retention. Under root-filesystem pressure (free space below
+# disk_pressure_floor_gib), idle entries use the shorter threshold and are
+# removed oldest/largest-first until the floor is restored. Defaults: 8 GiB / 30 min.
+scratch:
+  disk_pressure_floor_gib: 8
+  disk_pressure_idle_hours: 0.5
+
 # =============================================================================
 # Attachments
 # =============================================================================
