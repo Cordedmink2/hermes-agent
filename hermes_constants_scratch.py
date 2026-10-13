@@ -352,6 +352,7 @@ def release_git_worktrees(repos: set[str]) -> None:
 
 def prune_idle_entries(
     root: Path, max_idle_hours: float, skip_names: frozenset[str], log_file: Path | None = None,
+    *, free_space_floor_bytes: int = 8 * 1024**3, pressure_idle_hours: float = 0.5,
 ) -> int:
     """Delete top-level entries of *root* with no write anywhere in their subtree for
     *max_idle_hours*, reaping processes and worktree registrations rooted in them first.
@@ -360,7 +361,8 @@ def prune_idle_entries(
     removed."""
     audit = _open_prune_log(log_file)
     try:
-        return _prune_idle_entries(root, max_idle_hours, skip_names, audit)
+        return _prune_idle_entries(root, max_idle_hours, skip_names, audit,
+                                   free_space_floor_bytes, pressure_idle_hours)
     finally:
         if audit is not logger:
             for handler in audit.handlers:
@@ -369,8 +371,14 @@ def prune_idle_entries(
 
 def _prune_idle_entries(
     root: Path, max_idle_hours: float, skip_names: frozenset[str], audit: logging.Logger,
+    free_space_floor_bytes: int = 8 * 1024**3, pressure_idle_hours: float = 0.5,
 ) -> int:
-    cutoff = time.time() - max_idle_hours * 3600
+    try:
+        pressured = shutil.disk_usage(root).free < free_space_floor_bytes
+    except OSError:
+        pressured = False
+    idle_hours = min(max_idle_hours, pressure_idle_hours) if pressured else max_idle_hours
+    cutoff = time.time() - idle_hours * 3600
     # Entries already known to hold files this user cannot read or delete are skipped before
     # any walk, until that is fixed (hermes_constants_scratch_stuck).
     skip_names = skip_names | stuck.load_skips(root) | {stuck.STUCK_STATE_NAME, stuck.STUCK_LOCK_NAME}
@@ -387,6 +395,10 @@ def _prune_idle_entries(
             # A dir this user may not list (root-owned 0700) fails every idle scan: kept
             # (fail-closed) as before, but reported once and no longer re-scanned hourly.
             stuck.record(root, e, [denied_dir], audit)
+    # Under pressure, recover oldest/largest first and stop as soon as the configured floor
+    # is restored. Recent activity remains an unconditional keep via the cutoff above.
+    if pressured:
+        doomed.sort(key=lambda e: (e.stat().st_mtime, -_tree_bytes(e)))
     # Runs even with nothing to delete: orphans whose cwd was removed by an earlier pass
     # (or by hand) are found by the deleted-cwd rule, not by membership in ``doomed``.
     try:
@@ -398,6 +410,12 @@ def _prune_idle_entries(
     repos: set[str] = set()
     removed = 0
     for entry in doomed:
+        if pressured:
+            try:
+                if shutil.disk_usage(root).free >= free_space_floor_bytes:
+                    break
+            except OSError:
+                break
         # Worktree scan first: a registration whose tree an earlier pass (or hand)
         # removed is stale even in a rescued entry, and the re-check below sits as
         # close to the delete as the loop allows.
