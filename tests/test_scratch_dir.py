@@ -67,6 +67,24 @@ def test_prune_removes_idle_entries_and_keeps_trees_written_deep_inside(tmp_path
     assert not idle.exists() and live.exists() and fresh.exists()
 
 
+def test_disk_pressure_uses_shorter_idle_window_and_stops_after_recovery(tmp_path, monkeypatch):
+    import hermes_constants_scratch as scratch_module
+
+    root = tmp_path / "scratch"
+    old_entry = root / "old"
+    recent_entry = root / "recent"
+    old_entry.mkdir(parents=True)
+    recent_entry.mkdir()
+    old = time.time() - 3600
+    os.utime(old_entry, (old, old))
+    monkeypatch.setattr(scratch_module, "reap_processes_rooted_in", lambda *_: 0)
+    monkeypatch.setattr(scratch_module.shutil, "disk_usage", lambda _path: shutil._ntuple_diskusage(
+        100, 90, 10 if old_entry.exists() else 25))
+    assert scratch_module.prune_idle_entries(root, 24, frozenset(), free_space_floor_bytes=20,
+                                             pressure_idle_hours=0.5) == 1
+    assert not old_entry.exists() and recent_entry.exists()
+
+
 @pytest.mark.platforms("posix")  # POSIX directory modes
 class TestScratchDirPermissionPolicy:
     """get_scratch_dir must honor the home permission policy instead of a blanket 0700:
