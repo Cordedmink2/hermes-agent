@@ -85,6 +85,112 @@ def test_disk_pressure_uses_shorter_idle_window_and_stops_after_recovery(tmp_pat
     assert not old_entry.exists() and recent_entry.exists()
 
 
+def test_prune_reads_disk_pressure_settings_from_config(tmp_path, monkeypatch):
+    import hermes_constants_scratch as scratch_module
+    import hermes_constants
+    from hermes_cli import config
+
+    observed = {}
+    monkeypatch.setattr(config, "load_config", lambda: {"scratch": {
+        "disk_pressure_floor_gib": 3, "disk_pressure_idle_hours": 0.25}})
+    monkeypatch.setattr(hermes_constants, "get_scratch_dir", lambda **_kwargs: tmp_path / "scratch")
+
+    def capture(_root, _max_idle, _skip, _log, **kwargs):
+        observed.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(scratch_module, "prune_idle_entries", capture)
+    prune_scratch_dir(tmp_path / "scratch")
+    assert observed == {"free_space_floor_bytes": 3 * 1024**3, "pressure_idle_hours": 0.25}
+
+
+@pytest.mark.parametrize("free_bytes,should_remove", [(10, True), (30, False)])
+def test_pressure_one_hour_entry_removed_only_when_below_floor(tmp_path, monkeypatch, free_bytes, should_remove):
+    import hermes_constants_scratch as scratch_module
+
+    root = tmp_path / "scratch"
+    entry = root / "one-hour-old"
+    entry.mkdir(parents=True)
+    old = time.time() - 3600
+    os.utime(entry, (old, old))
+    monkeypatch.setattr(scratch_module, "reap_processes_rooted_in", lambda *_: 0)
+    monkeypatch.setattr(scratch_module.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(100, 90, free_bytes))
+    scratch_module.prune_idle_entries(root, 24, frozenset(), free_space_floor_bytes=20, pressure_idle_hours=0.5)
+    assert entry.exists() is (not should_remove)
+
+
+def test_pressure_keeps_recently_touched_entry(tmp_path, monkeypatch):
+    import hermes_constants_scratch as scratch_module
+
+    root = tmp_path / "scratch"
+    entry = root / "recent"
+    entry.mkdir(parents=True)
+    monkeypatch.setattr(scratch_module, "reap_processes_rooted_in", lambda *_: 0)
+    monkeypatch.setattr(scratch_module.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(100, 90, 10))
+    assert scratch_module.prune_idle_entries(root, 24, frozenset(), free_space_floor_bytes=20) == 0
+    assert entry.exists()
+
+
+def test_pressure_stops_after_free_space_recovers(tmp_path, monkeypatch):
+    import hermes_constants_scratch as scratch_module
+
+    root = tmp_path / "scratch"
+    entries = [root / name for name in ("first", "second")]
+    for entry in entries:
+        entry.mkdir(parents=True)
+        old = time.time() - 7200
+        os.utime(entry, (old, old))
+    monkeypatch.setattr(scratch_module, "reap_processes_rooted_in", lambda *_: 0)
+    calls = {"n": 0}
+
+    def usage(_path):
+        calls["n"] += 1
+        return shutil._ntuple_diskusage(100, 90, 10 if calls["n"] <= 2 else 25)
+
+    monkeypatch.setattr(scratch_module.shutil, "disk_usage", usage)
+    assert scratch_module.prune_idle_entries(root, 24, frozenset(), free_space_floor_bytes=20) == 1
+    assert not entries[0].exists() and entries[1].exists()
+
+
+def test_pressure_orders_oldest_then_largest(tmp_path, monkeypatch):
+    import hermes_constants_scratch as scratch_module
+
+    root = tmp_path / "scratch"
+    oldest_small, older_big, newer_big = (root / n for n in ("oldest-small", "older-big", "newer-big"))
+    for entry in (oldest_small, older_big, newer_big):
+        entry.mkdir(parents=True)
+    now = time.time()
+    os.utime(oldest_small, (now - 7200, now - 7200))
+    os.utime(older_big, (now - 3600, now - 3600))
+    os.utime(newer_big, (now - 1800, now - 1800))
+    (older_big / "payload").write_bytes(b"x" * 100)
+    (newer_big / "payload").write_bytes(b"x" * 200)
+    ancient = now - 3600
+    os.utime(older_big, (ancient, ancient))
+    os.utime(newer_big, (ancient, ancient))
+    for payload in (older_big / "payload", newer_big / "payload"):
+        os.utime(payload, (ancient, ancient))
+    monkeypatch.setattr(scratch_module, "reap_processes_rooted_in", lambda *_: 0)
+    monkeypatch.setattr(scratch_module.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(100, 90, 10))
+    removed = []
+    real_unlink = scratch_module.Path.unlink
+
+    def record_unlink(path, *args, **kwargs):
+        removed.append(path.name)
+        return real_unlink(path, *args, **kwargs)
+
+    real_rmtree = scratch_module.shutil.rmtree
+
+    def record_rmtree(path, *args, **kwargs):
+        removed.append(path.name)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(scratch_module.Path, "unlink", record_unlink)
+    monkeypatch.setattr(scratch_module.shutil, "rmtree", record_rmtree)
+    assert scratch_module.prune_idle_entries(root, 24, frozenset(), free_space_floor_bytes=20) == 3
+    assert removed == ["oldest-small", "newer-big", "older-big"]
+
+
 @pytest.mark.platforms("posix")  # POSIX directory modes
 class TestScratchDirPermissionPolicy:
     """get_scratch_dir must honor the home permission policy instead of a blanket 0700:

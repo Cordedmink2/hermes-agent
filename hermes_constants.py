@@ -924,7 +924,18 @@ def prune_scratch_dir(scratch: Path | None = None, max_idle_hours: float = SCRAT
 
     root = scratch if scratch is not None else get_scratch_dir(prune=False)
     log_file = root.parent.parent / "logs" / "scratch-prune.log"
-    return prune_idle_entries(root, max_idle_hours, frozenset({_SCRATCH_PRUNE_STAMP}), log_file)
+    from hermes_cli.config import load_config
+
+    scratch_config = (load_config() or {}).get("scratch") or {}
+    floor_gib = scratch_config.get("disk_pressure_floor_gib", 8)
+    pressure_idle_hours = scratch_config.get("disk_pressure_idle_hours", 0.5)
+    try:
+        floor_bytes = int(float(floor_gib) * 1024**3)
+        pressure_idle_hours = float(pressure_idle_hours)
+    except (TypeError, ValueError, OverflowError):
+        floor_bytes, pressure_idle_hours = 8 * 1024**3, 0.5
+    return prune_idle_entries(root, max_idle_hours, frozenset({_SCRATCH_PRUNE_STAMP}), log_file,
+                              free_space_floor_bytes=floor_bytes, pressure_idle_hours=pressure_idle_hours)
 
 
 def _prune_scratch_dir_once(scratch: Path) -> None:
