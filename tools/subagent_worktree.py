@@ -153,10 +153,11 @@ def finalize_subagent_worktree(info: Dict[str, str], *, prune: bool = True) -> D
         return mark_worktree_payload_unproven(
             payload, "no base_commit recorded — commit count unmeasurable", unmeasured="commits")
     # The status probe re-hashes files the child touched, which runs repo-named clean filters.
-    from hermes_cli._subprocess_compat import noninteractive_repo_git_env
+    from hermes_cli._subprocess_compat import NO_OPTIONAL_LOCKS_ENV, noninteractive_repo_git_env
     probe_env = noninteractive_repo_git_env(path)
     if probe_env is None:
         return mark_worktree_payload_unproven(payload, "filter discovery failed", unmeasured="dirty")
+    probe_env.update(NO_OPTIONAL_LOCKS_ENV)  # read-only probes: a timeout kill must not strand index.lock
     failed, unmeasured = [], []
     probes = (("commits", "rev-list", ["rev-list", "--count", f"{base_commit}..HEAD"],
                lambda s: int(s or 0)),

@@ -17,7 +17,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
+from hermes_cli._subprocess_compat import NO_OPTIONAL_LOCKS_ENV, harden_git_argv, noninteractive_git_env
 
 _GIT_TIMEOUT = 30
 _GH_TIMEOUT = 30
@@ -44,9 +44,16 @@ def _run(argv: list[str], cwd: str, timeout: int, env: dict) -> subprocess.Compl
         return None
 
 
-def _git(cwd: str, args: list[str], *, timeout: int = _GIT_TIMEOUT) -> tuple[int, str, str]:
-    """(returncode, stdout, stderr) of ``git`` in ``cwd``; never raises on non-zero exit."""
-    proc = _run(["git", *harden_git_argv(args)], cwd, timeout, noninteractive_git_env())
+def _git(cwd: str, args: list[str], *, timeout: int = _GIT_TIMEOUT,
+         read_only: bool = False) -> tuple[int, str, str]:
+    """(returncode, stdout, stderr) of ``git`` in ``cwd``; never raises on non-zero exit.
+
+    ``read_only`` status reads skip optional locks: a timeout kill mid index-refresh would
+    otherwise strand ``.git/index.lock`` and break every later write in the repo."""
+    env = noninteractive_git_env()
+    if read_only:
+        env.update(NO_OPTIONAL_LOCKS_ENV)
+    proc = _run(["git", *harden_git_argv(args)], cwd, timeout, env)
     if proc is None:
         return 1, "", "git invocation failed"
     return proc.returncode, proc.stdout, proc.stderr
@@ -79,7 +86,7 @@ def _is_dir(cwd: str) -> bool:
 
 def _status_z(cwd: str, *extra: str) -> tuple[int, str]:
     """(returncode, raw) of ``git status --porcelain=v2 -z``."""
-    code, raw, _ = _git(cwd, ["status", "--porcelain=v2", *extra, "-z"])
+    code, raw, _ = _git(cwd, ["status", "--porcelain=v2", *extra, "-z"], read_only=True)
     return code, raw
 
 
@@ -327,7 +334,8 @@ def file_diff_vs_head(cwd: str, file_path: str) -> str:
     head = _single_file_diff(cwd, ["HEAD"], file_path)
     if head.strip():
         return head
-    status = _git_out(cwd, ["status", "--porcelain", "--", literal])
+    code, status, _ = _git(cwd, ["status", "--porcelain", "--", literal], read_only=True)
+    status = status if code == 0 else ""
     return _all_add_diff(cwd, file_path) if status.strip().startswith("??") else ""
 
 
