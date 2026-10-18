@@ -35,6 +35,7 @@ __all__ = [
     "FILTER_DISCOVERY_FAILED",
     "NO_DRIVER_DIFF_FLAGS",
     "NO_LAZY_FETCH_ENV",
+    "NO_OPTIONAL_LOCKS_ENV",
     "pid_is_hermes",
     "pid_exists_stdlib",
 ]
@@ -280,6 +281,12 @@ def windows_detach_popen_kwargs() -> dict:
 # history download on every launch that ran on orphaned, piling up partial packs. With this set the
 # probe fails fast on the missing object instead (git >= 2.44; older git ignores the variable).
 NO_LAZY_FETCH_ENV = {"GIT_NO_LAZY_FETCH": "1"}
+
+# Read-only probes must never take optional locks either. ``git status`` opportunistically refreshes
+# the index under ``.git/index.lock``; a probe timeout SIGKILLs git mid-refresh and strands that lock,
+# so every later git write in the repo fails with "index.lock: File exists". The session-start
+# workspace snapshot (agent/coding_context) did exactly this in a terminal.cwd repo on busy boards.
+NO_OPTIONAL_LOCKS_ENV = {"GIT_OPTIONAL_LOCKS": "0"}
 
 
 # GIT_CONFIG_KEY_n/VALUE_n overrides for internal git children: no credential/askpass prompts, no
@@ -894,7 +901,8 @@ def bounded_git_probe(argv: Sequence[str], *, timeout: float, env: "Mapping[str,
     openai/codex#36793). ``process_group`` only changes which group the child belongs to; it does not detach
     the terminal or alter the fast path.
     """
-    result = bounded_probe_run(argv, timeout=timeout, env={**(env or noninteractive_git_env()), **NO_LAZY_FETCH_ENV})
+    result = bounded_probe_run(argv, timeout=timeout, env={
+        **(env or noninteractive_git_env()), **NO_LAZY_FETCH_ENV, **NO_OPTIONAL_LOCKS_ENV})
     if result is None or result.returncode != 0:
         return ""
     return (result.stdout or "").strip()

@@ -15,7 +15,7 @@ import os
 import subprocess
 from typing import Dict, Optional
 
-from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_repo_git_env
+from hermes_cli._subprocess_compat import NO_OPTIONAL_LOCKS_ENV, harden_git_argv, noninteractive_repo_git_env
 
 TAIL_LINES = 20
 TAIL_CHARS = 2_000
@@ -52,6 +52,7 @@ def git_state_hint(cwd: Optional[str]) -> Optional[str]:
     env = noninteractive_repo_git_env(cwd)
     if env is None:
         return None
+    env.update(NO_OPTIONAL_LOCKS_ENV)  # read-only probes: a timeout kill must not strand index.lock
 
     def run(*args: str) -> Optional[str]:
         try:

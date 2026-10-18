@@ -68,16 +68,19 @@ class ExternalTreeRecord:
     missing: bool         # registered but the directory no longer exists
 
 
-def _git(args: list, cwd: str, timeout: int = 15) -> subprocess.CompletedProcess:
+def _git(args: list, cwd: str, timeout: int = 15, read_only: bool = False) -> subprocess.CompletedProcess:
     """Run git, translating timeouts into returncode 124. Every verdict fails safe toward "keep"
     on nonzero, so a slow ``git cherry`` on a huge repo degrades to keep instead of aborting the
     audit mid-list. :func:`noninteractive_repo_git_env` because ``status`` executes the repo's
-    ``core.fsmonitor`` and clean filters (GHSA-7x36-8jrh-v4pw)."""
-    from hermes_cli._subprocess_compat import FILTER_DISCOVERY_FAILED, noninteractive_repo_git_env
+    ``core.fsmonitor`` and clean filters (GHSA-7x36-8jrh-v4pw). ``read_only`` probes also skip
+    optional locks, so a timeout kill cannot strand ``.git/index.lock``."""
+    from hermes_cli._subprocess_compat import FILTER_DISCOVERY_FAILED, NO_OPTIONAL_LOCKS_ENV, noninteractive_repo_git_env
     env = noninteractive_repo_git_env(cwd)
     if env is None:
         return subprocess.CompletedProcess(args=["git", *args], returncode=1, stdout="",
                                            stderr=FILTER_DISCOVERY_FAILED)
+    if read_only:
+        env.update(NO_OPTIONAL_LOCKS_ENV)
     try:
         return _run(["git", *args], timeout, cwd, env=env)
     except subprocess.TimeoutExpired:
@@ -97,7 +100,7 @@ def _tree_size_mb(path: Path, timeout: int = 30) -> Optional[int]:
 def _dirty_split(path: str) -> tuple[bool, List[str]]:
     """(has_tracked_modifications, untracked_paths) — tracked = real work, untracked = archivable."""
     try:
-        result = _git(["status", "--porcelain"], cwd=path, timeout=10)
+        result = _git(["status", "--porcelain"], cwd=path, timeout=10, read_only=True)
         if result.returncode != 0:
             return True, []  # fail safe: treat as real work
         lines = [line for line in result.stdout.splitlines() if line.strip()]
