@@ -12,6 +12,7 @@ Resolution order:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tomllib
 from dataclasses import dataclass
@@ -226,6 +227,8 @@ def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> Ver
             text=True, encoding="utf-8", errors="replace",
             timeout=3,
             cwd=str(repo_dir),
+            # Read-only: never refresh the index under .git/index.lock; a timeout kill would strand it.
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
         dirty = dirty_result.returncode == 0 and bool((dirty_result.stdout or "").strip())
     except (OSError, subprocess.SubprocessError):
