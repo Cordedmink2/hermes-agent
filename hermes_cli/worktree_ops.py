@@ -567,14 +567,14 @@ def _worktree_is_dirty(worktree_path: str, repo_root, timeout: int = 10) -> bool
     skip-worktree / assume-unchanged files whose bytes differ from the index count as changes
     (``git status`` trusts both flags).
     """
-    from hermes_cli._subprocess_compat import noninteractive_repo_git_env
+    from hermes_cli._subprocess_compat import NO_OPTIONAL_LOCKS_ENV, noninteractive_repo_git_env
     try:
         # Reclaimers run this unattended; status reads the index (core.fsmonitor, clean filters).
         env = noninteractive_repo_git_env(worktree_path)
         if env is None:
             return True
         result = _git(["status", "--porcelain", "-z", "--untracked-files=normal"], worktree_path,
-                      timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+                      timeout=timeout, stdin=subprocess.DEVNULL, env={**env, **NO_OPTIONAL_LOCKS_ENV})
         if result.returncode != 0:
             return True
         entries = [e for e in result.stdout.split("\0") if e]
