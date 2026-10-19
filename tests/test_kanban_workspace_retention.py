@@ -108,3 +108,13 @@ def test_candidate_nested_in_active_worktree_fails_closed(tmp_path):
                          active_worktrees={workspace.parent})[0]
     assert row["action"] == "keep"
     assert "active git worktree" in row["reason"]
+
+
+def test_root_default_board_is_planned(tmp_path):
+    """The default board lives at <home>/kanban.db, not under boards/; its cards must be planned too."""
+    workspace, boards = setup(tmp_path)
+    root_db = tmp_path / "kanban.db"
+    (boards / "test" / "kanban.db").rename(root_db)
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set(), extra_dbs=[root_db])
+    assert [r["task_id"] for r in rows] == ["task-1"]
+    assert rows[0]["action"] == "archive"
