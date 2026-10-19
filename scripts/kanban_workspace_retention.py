@@ -69,7 +69,10 @@ def _only_regenerable(path: Path) -> bool:
 
 
 def plan(workspace_root: Path, board_root: Path, now: float | None = None,
-         active_worktrees: set[Path] | None = None, repo: Path | None = None) -> list[dict]:
+         active_worktrees: set[Path] | None = None, repo: Path | None = None,
+         extra_dbs: list[Path] | None = None) -> list[dict]:
+    """``extra_dbs``: boards outside ``board_root`` — notably the default board at
+    ``<home>/kanban.db``, whose scratch workspaces were otherwise never planned."""
     now = time.time() if now is None else now
     worktree_error = None
     if active_worktrees is not None:
@@ -81,7 +84,8 @@ def plan(workspace_root: Path, board_root: Path, now: float | None = None,
             detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
             protected, worktree_error = set(), detail
     result = []
-    for db in sorted(board_root.glob("*/kanban.db")):
+    dbs = [p for p in (extra_dbs or []) if p.is_file()] + sorted(board_root.glob("*/kanban.db"))
+    for db in dbs:
         try:
             with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
                 tasks = conn.execute("SELECT id,status,workspace_path FROM tasks WHERE workspace_kind='scratch'").fetchall()
@@ -153,7 +157,7 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="execute eligible actions (dry-run otherwise)")
     args = parser.parse_args()
     root = args.workspace_root or args.home / "kanban" / "workspaces"
-    rows = plan(root, args.home / "kanban" / "boards")
+    rows = plan(root, args.home / "kanban" / "boards", extra_dbs=[args.home / "kanban.db"])
     execute(rows, args.archive_root, args.apply)
     return 0
 
