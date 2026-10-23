@@ -282,7 +282,7 @@ def test_registry_vault_fill_focuses_shadow_login_and_keeps_origin_guards(browse
     # Make the unrelated first tab active before the registry call. The vault
     # handler must focus the second tab by exact origin and shared probe scope.
     assert supervisor.focus_page(origin)["ok"]
-    raw = registry.dispatch("browser_vault_fill", {"handle": item.id}, task_id=task)
+    raw = registry.dispatch("browser_vault", {"action": "fill", "handle": item.id}, task_id=task)
     result = json.loads(raw if isinstance(raw, str) else json.dumps(raw))
     assert result["success"] is True
     assert result["filled_fields"] == 1
@@ -302,7 +302,7 @@ def test_registry_vault_fill_focuses_shadow_login_and_keeps_origin_guards(browse
         {"identifier": "synthetic-user", "identifier_type": "username", "password": "alternate-dummy-value"},
         origin="https://absent.invalid",
     )
-    refusal_raw = registry.dispatch("browser_vault_fill", {"handle": absent.id}, task_id=task)
+    refusal_raw = registry.dispatch("browser_vault", {"action": "fill", "handle": absent.id}, task_id=task)
     refusal = json.loads(refusal_raw if isinstance(refusal_raw, str) else json.dumps(refusal_raw))
     assert refusal["success"] is False
     assert refusal["error_type"] == "origin_mismatch"
