@@ -23,6 +23,9 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_scopes as kbs
 
+# systemctl is a fake binary on PATH (FakeSystemctl); the live-system guard cannot tell it from the real one.
+pytestmark = pytest.mark.live_system_guard_bypass
+
 
 @pytest.fixture
 def conn(tmp_path, monkeypatch):

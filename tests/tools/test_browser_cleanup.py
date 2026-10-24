@@ -94,7 +94,7 @@ class TestBrowserCleanup:
         browser_tool = self.browser_tool
         browser_tool._cleanup_done = False
         browser_tool._active_sessions.clear()
-        monkeypatch.setattr(browser_use_cli, "_driven_daemons", {"r7k2"})
+        monkeypatch.setattr(browser_use_cli, "_driven_daemons", {("r7k2",): "home-a"})
         monkeypatch.setattr(browser_use_cli, "_find_cli", lambda: ["browser-harness"])
         calls = []
         monkeypatch.setattr(
@@ -106,7 +106,7 @@ class TestBrowserCleanup:
         bt_lifecycle._emergency_cleanup_all_sessions()
 
         assert calls == [(["browser-harness", "--reload"], "r7k2")]
-        assert browser_use_cli._driven_daemons == set()
+        assert browser_use_cli._driven_daemons == {}
 
 
 class TestInactivityJanitorMultiplex:
