@@ -72,6 +72,16 @@ def test_prune_removes_idle_entries_and_keeps_trees_written_deep_inside(tmp_path
     assert not idle.exists() and live.exists() and fresh.exists()
 
 
+@pytest.fixture(autouse=True)
+def _host_disk_not_under_pressure(monkeypatch):
+    """The disk-pressure prune mode keys off the host's real free space; without this a nearly-full
+    CI/dev host silently shortens every test's idle window. Tests that exercise pressure patch
+    ``shutil.disk_usage`` themselves (later monkeypatch wins)."""
+    import hermes_constants_scratch as scratch_module
+    monkeypatch.setattr(scratch_module.shutil, "disk_usage",
+                        lambda _p: shutil._ntuple_diskusage(10**12, 0, 10**12))
+
+
 @pytest.mark.platforms("posix")  # DirEntry.stat() reports st_nlink only on POSIX
 def test_prune_ignores_freshened_hardlinks_shared_with_a_live_repo(tmp_path):
     """``git clone --local`` hardlinks packs into a scratch clone; when git freshens the source
