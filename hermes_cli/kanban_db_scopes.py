@@ -26,7 +26,7 @@ _log = logging.getLogger(__name__)
 MAX_SCOPE_STOPS_PER_TICK = 5
 
 
-def kanban_worker_unit_suffix(task_id: str, run_id: "int | str") -> str:
+def kanban_worker_unit_suffix(task_id: str, run_id: int | str) -> str:
     """Systemd unit suffix of a Kanban worker's scope (``hermes-worker-<suffix>.scope``).
 
     The one place the format lives: the spawn path names the scope with it and
@@ -57,7 +57,7 @@ def _active_kanban_worker_scopes() -> list[tuple[str, str, int]]:
         [binary, "--user", "list-units", "--type=scope", "--state=active",
          "--no-legend", "--plain", "hermes-worker-kanban-*"],
         capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL,
-        env=systemd_user_bus_env(),
+        env=systemd_user_bus_env(), check=False,
     )
     if proc.returncode != 0:
         return []

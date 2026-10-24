@@ -84,7 +84,7 @@ class ContextEngine(ABC):
     awaiting_real_usage_after_compression: bool = False
     last_real_prompt_tokens: int = 0
 
-    def get_active_compression_failure_cooldown(self, *, refresh: bool = False) -> Optional[Dict[str, Any]]:
+    def get_active_compression_failure_cooldown(self, *, refresh: bool = False) -> Optional[dict[str, Any]]:
         """Active summary-failure cooldown record, or ``None`` (the default: no cooldown)."""
         return None
 

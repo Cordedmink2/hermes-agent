@@ -29,20 +29,20 @@ class _MinimalEngine(ContextEngine):
     def __init__(self) -> None:
         self.threshold_tokens = 100_000
         self.context_length = 200_000
-        self.compress_calls: List[int] = []
+        self.compress_calls: list[int] = []
 
     @property
     def name(self) -> str:
         return "minimal"
 
-    def update_from_response(self, usage: Dict[str, Any]) -> None:
+    def update_from_response(self, usage: dict[str, Any]) -> None:
         pass
 
-    def should_compress(self, prompt_tokens: int = None) -> bool:
+    def should_compress(self, prompt_tokens: int | None = None) -> bool:
         return False
 
     def compress(self, messages, current_tokens: Optional[int] = None, focus_topic=None,
-                 force: bool = False, memory_context: str = "") -> List[Dict[str, Any]]:
+                 force: bool = False, memory_context: str = "") -> list[dict[str, Any]]:
         self.compress_calls.append(len(messages))
         return [{"role": "user", "content": "[CONTEXT COMPACTION] summary"}] + messages[-2:]
 

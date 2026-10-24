@@ -30,11 +30,11 @@ def _seed(db: SessionDB, sid: str, *, assistant_age_s: float) -> None:
     db.append_message(sid, "user", "earlier")
     db.append_message(sid, "assistant", "reply")
     ts = time.time() - assistant_age_s
-    with db._lock:  # noqa: SLF001 — test fixture backdates the row
-        db._conn.execute(  # noqa: SLF001
+    with db._lock:
+        db._conn.execute(
             "UPDATE messages SET timestamp = ? WHERE session_id = ?", (ts, sid)
         )
-        db._conn.commit()  # noqa: SLF001
+        db._conn.commit()
 
 
 def test_idle_gap_survives_turn_entry(tmp_path: Path) -> None:

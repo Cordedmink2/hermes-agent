@@ -369,23 +369,22 @@ def prune_idle_entries(
                 handler.close()
 
 
-def _prune_idle_entries(
-    root: Path, max_idle_hours: float, skip_names: frozenset[str], audit: logging.Logger,
-    free_space_floor_bytes: int = 8 * 1024**3, pressure_idle_hours: float = 0.5,
-) -> int:
+def _below_free_floor(root: Path, floor_bytes: int) -> bool:
+    """True when *root*'s filesystem has less than *floor_bytes* free (unreadable: not pressured)."""
     try:
-        pressured = shutil.disk_usage(root).free < free_space_floor_bytes
+        return shutil.disk_usage(root).free < floor_bytes
     except OSError:
-        pressured = False
-    idle_hours = min(max_idle_hours, pressure_idle_hours) if pressured else max_idle_hours
-    cutoff = time.time() - idle_hours * 3600
-    # Entries already known to hold files this user cannot read or delete are skipped before
-    # any walk, until that is fixed (hermes_constants_scratch_stuck).
-    skip_names = skip_names | stuck.load_skips(root) | {stuck.STUCK_STATE_NAME, stuck.STUCK_LOCK_NAME}
+        return False
+
+
+def _reap_rooted(root: Path, entries: list[Path], audit: logging.Logger) -> None:
     try:
-        entries = [e for e in root.iterdir() if e.name not in skip_names]
-    except OSError:
-        return 0
+        reap_processes_rooted_in(root, entries, audit)
+    except Exception as exc:  # psutil missing or restricted host: deletion proceeds
+        logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
+
+
+def _idle_entries(root: Path, entries: list[Path], cutoff: float, audit: logging.Logger) -> list[Path]:
     doomed = []
     for e in entries:
         state, denied_dir = _scan_subtree(e, cutoff)
@@ -395,6 +394,24 @@ def _prune_idle_entries(
             # A dir this user may not list (root-owned 0700) fails every idle scan: kept
             # (fail-closed) as before, but reported once and no longer re-scanned hourly.
             stuck.record(root, e, [denied_dir], audit)
+    return doomed
+
+
+def _prune_idle_entries(
+    root: Path, max_idle_hours: float, skip_names: frozenset[str], audit: logging.Logger,
+    free_space_floor_bytes: int = 8 * 1024**3, pressure_idle_hours: float = 0.5,
+) -> int:
+    pressured = _below_free_floor(root, free_space_floor_bytes)
+    idle_hours = min(max_idle_hours, pressure_idle_hours) if pressured else max_idle_hours
+    cutoff = time.time() - idle_hours * 3600
+    # Entries already known to hold files this user cannot read or delete are skipped before
+    # any walk, until that is fixed (hermes_constants_scratch_stuck).
+    skip_names = skip_names | stuck.load_skips(root) | {stuck.STUCK_STATE_NAME, stuck.STUCK_LOCK_NAME}
+    try:
+        entries = [e for e in root.iterdir() if e.name not in skip_names]
+    except OSError:
+        return 0
+    doomed = _idle_entries(root, entries, cutoff, audit)
     # Under pressure, recover oldest/largest first and stop as soon as the configured floor
     # is restored. Recent activity remains an unconditional keep via the cutoff above.
     if pressured:
@@ -402,28 +419,18 @@ def _prune_idle_entries(
     # Runs even with nothing to delete: orphans whose cwd was removed by an earlier pass
     # (or by hand) are found by the deleted-cwd rule, not by membership in ``doomed``.
     if not pressured:
-        try:
-            reap_processes_rooted_in(root, doomed, audit)
-        except Exception as exc:  # psutil missing or restricted host: deletion still proceeds
-            logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
+        _reap_rooted(root, doomed, audit)
     if not doomed:
         return 0
     repos: set[str] = set()
     removed = 0
     for entry in doomed:
         if pressured:
-            try:
-                if shutil.disk_usage(root).free >= free_space_floor_bytes:
-                    break
-            except OSError:
-                break
-        # Pressure-mode candidates are reaped only once selected for deletion; the normal
-        # retention mode preserves its prior all-candidates reap behaviour above.
-        if pressured:
-            try:
-                reap_processes_rooted_in(root, [entry], audit)
-            except Exception as exc:  # psutil missing or restricted host: deletion proceeds
-                logger.debug("scratch prune: process reap skipped: %s", exc, exc_info=True)
+            if not _below_free_floor(root, free_space_floor_bytes):
+                break  # floor restored (or unreadable): stop recovering
+            # Pressure-mode candidates are reaped only once selected for deletion; the normal
+            # retention mode preserves its prior all-candidates reap behaviour above.
+            _reap_rooted(root, [entry], audit)
         # Worktree scan first: a registration whose tree an earlier pass (or hand)
         # removed is stale even in a rescued entry, and the re-check below sits as
         # close to the delete as the loop allows.

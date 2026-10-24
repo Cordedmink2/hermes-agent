@@ -692,7 +692,7 @@ def test_payload_venv_that_is_not_real_is_not_provenance(tmp_path, monkeypatch, 
     assert _validated_runtime_venv({}) is None
 
 
-def test_superseded_generation_site_packages_never_reaches_children(child_env, monkeypatch):
+def test_superseded_generation_site_packages_never_reaches_children(child_env, monkeypatch):  # health: allow F811 -- fixture imported by name, as in every test in this module
     """Invariant: after an update commits a new generation, a process still booted on the old one
     must not leak that generation's site-packages to children (system Python of another version
     then imports the backend's C extensions). Only exact generation site-packages are owned."""

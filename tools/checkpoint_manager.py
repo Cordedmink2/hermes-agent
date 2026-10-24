@@ -765,7 +765,7 @@ def _dir_size_bytes(path: Path) -> int:
 
 def _oversize_worktree_paths(
     store: Path, working_dir: str, index_file: Path, max_file_size_mb: int,
-) -> List[str]:
+) -> list[str]:
     """Return tracked and untracked, non-ignored worktree paths exceeding the cap."""
     cap = max_file_size_mb * 1024 * 1024
     if cap <= 0:
@@ -790,7 +790,7 @@ def _oversize_worktree_paths(
 
 def _stage_checkpoint_files(
     store: Path, working_dir: str, index_file: Path, max_file_size_mb: int,
-) -> Tuple[bool, str, str]:
+) -> tuple[bool, str, str]:
     """Stage snapshot files without writing oversized blobs to the shared store."""
     oversize = _oversize_worktree_paths(store, working_dir, index_file, max_file_size_mb)
     if not oversize:

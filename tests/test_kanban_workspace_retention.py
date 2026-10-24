@@ -112,7 +112,7 @@ def test_candidate_nested_in_active_worktree_fails_closed(tmp_path):
 
 def test_root_default_board_is_planned(tmp_path):
     """The default board lives at <home>/kanban.db, not under boards/; its cards must be planned too."""
-    workspace, boards = setup(tmp_path)
+    _workspace, boards = setup(tmp_path)
     root_db = tmp_path / "kanban.db"
     (boards / "test" / "kanban.db").rename(root_db)
     rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set(), extra_dbs=[root_db])

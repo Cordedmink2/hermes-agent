@@ -23,7 +23,7 @@ def _git_worktrees(repo: Path) -> set[Path]:
     """Read active worktrees from Git itself, including worktrees outside Kanban."""
     roots: set[Path] = set()
     result = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
-                            check=True, capture_output=True, text=True)
+                            check=True, capture_output=True, text=True, timeout=30)
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
             roots.add(Path(line.removeprefix("worktree ")))
@@ -44,7 +44,7 @@ def _unpushed_commits(path: Path) -> tuple[bool, str | None]:
         return False, None
     try:
         probe = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-                               capture_output=True, text=True, timeout=30)
+                               capture_output=True, text=True, timeout=30, check=False)
     except subprocess.TimeoutExpired:
         return False, "git rev-parse timed out"
     except OSError as exc:
@@ -53,7 +53,7 @@ def _unpushed_commits(path: Path) -> tuple[bool, str | None]:
         return False, probe.stderr.strip() or "git rev-parse failed"
     try:
         result = subprocess.run(["git", "-C", str(path), "log", "--branches", "--not", "--remotes", "--oneline"],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=30, check=False)
     except subprocess.TimeoutExpired:
         return False, "git log timed out"
     except OSError as exc:
@@ -142,7 +142,7 @@ def execute(rows: list[dict], archive_root: Path, apply: bool = False) -> list[d
         before, after = _inventory(src), _inventory(dst)
         if before != after:
             shutil.rmtree(dst)
-            raise IOError(f"archive verification failed for {src}: {before} != {after}")
+            raise OSError(f"archive verification failed for {src}: {before} != {after}")
         shutil.rmtree(src)
         row["action"] = "archived"
         row["verified_file_count"], row["verified_bytes"] = after
