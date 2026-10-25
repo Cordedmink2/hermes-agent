@@ -92,3 +92,109 @@ def settle_quietly(job_id: Optional[str], execution_id: Optional[str]) -> None:
         settle_queued_delivery(job_id, execution_id)
     except Exception:
         logger.warning("Cron delivery %s: outcome write-back failed", execution_id, exc_info=True)
+
+
+_RECEIPT_OUTCOME = {"settled": "delivered", "failed": "failed", "cancelled": "failed", "ambiguous": "failed"}
+
+
+def _bot_chat_receipt_home(target: str):
+    """Profile home a ``bot-chat:<profile>`` receipt lives in (``(own)`` is this profile)."""
+    from hermes_cli.profiles import get_profile_dir
+    from hermes_constants import get_hermes_home
+
+    name = target.split(":", 1)[1]
+    return (get_hermes_home() if name == "(own)" else get_profile_dir(name)).resolve()
+
+
+# Newest ledger rows per job examined each tick: bounds the scan while covering any realistic
+# gap between a run and its owner settling the receipt.
+_RECEIPT_SCAN_ROWS = 50
+
+
+def _bot_chat_targets(job: dict) -> list[str]:
+    """``bot-chat:<profile>`` targets a job delivers to (``bot-chat`` alone is this profile)."""
+    deliver = job.get("deliver")
+    parts = deliver if isinstance(deliver, (list, tuple)) else str(deliver or "").split(",")
+    targets = []
+    for part in parts:
+        part = str(part).strip()
+        if part == "bot-chat" or part.startswith("bot-chat:"):
+            name = part.split(":", 1)[1].strip() if ":" in part else ""
+            targets.append(f"bot-chat:{name or '(own)'}")
+    return list(dict.fromkeys(targets))
+
+
+def settle_bot_chat_receipts() -> int:
+    """Book the owner's terminal receipt onto every run that left Bot Chat delivery ``queued``.
+
+    Bot Chat admission returns a durable receipt without waiting for the owner, so the run
+    books ``delivery_queued``/``queued`` and no cron queue row exists to drain; the receipt
+    file is the only record of the outcome. Each ledger row still ``queued`` (bounded to the
+    job's newest rows) is settled from the receipt keyed by that row's own execution id, so a
+    receipt that lands after the next run started still settles its run. The job record is
+    touched only for the job's latest attempt and only when it recorded that same delivery id,
+    so a later run is never rewritten. Pending receipts are left for a later tick.
+    """
+    import hashlib
+    import json
+
+    from cron.executions import list_executions, settle_delivery_outcome
+    from cron.jobs import _with_job, load_jobs, save_jobs
+    from hermes_constants import get_hermes_home
+    from tools.bot_live_delivery import read_delivery_result
+
+    source_home = get_hermes_home().resolve()
+    settled = 0
+    for job in load_jobs():
+        targets = _bot_chat_targets(job)
+        if not targets:
+            continue
+        job_id = job["id"]
+        try:
+            rows = list_executions(job_id=job_id, limit=_RECEIPT_SCAN_ROWS)
+            if not any(r.get("delivery_outcome") == "queued" for r in rows):
+                continue
+            latest_id = rows[0]["id"]
+            for row in rows:
+                if row.get("delivery_outcome") != "queued":
+                    continue
+                execution_id = str(row["id"])
+                results = []
+                keys = {}
+                for target in targets:
+                    home = _bot_chat_receipt_home(target)
+                    key = hashlib.sha256(json.dumps(
+                        [str(source_home), job_id, execution_id, str(home)],
+                        ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+                    record = read_delivery_result(home, key)
+                    if record is None or record.get("status") not in _RECEIPT_OUTCOME:
+                        break  # still in flight (or unreadable): a later tick decides
+                    keys[target] = key
+                    results.append((target, record))
+                else:
+                    failed = [(t, r) for t, r in results if _RECEIPT_OUTCOME[r["status"]] == "failed"]
+                    error = "; ".join(
+                        f"{t} {r['status']}: {r.get('error') or r.get('reason') or 'not completed'}"
+                        for t, r in failed) or None
+                    if not settle_delivery_outcome(execution_id, "failed" if error else "delivered"):
+                        continue
+                    settled += 1
+                    if execution_id != latest_id:
+                        continue
+
+                    def apply(jobs, _i, current, _keys=keys, _error=error):
+                        recorded = current.get("last_delivery_queued") or {}
+                        if current.get("last_status") != "delivery_queued" or not recorded:
+                            return False
+                        if any((recorded.get(t) or {}).get("delivery_id") != k for t, k in _keys.items()):
+                            return False  # the recorded receipt belongs to some other run
+                        current["last_status"] = "delivery_failed" if _error else "ok"
+                        current["last_delivery_error"] = _error
+                        current["last_delivery_queued"] = None
+                        save_jobs(jobs)
+                        return True
+
+                    _with_job(job_id, apply, missing=False)
+        except Exception:
+            logger.warning("Cron job %s: Bot Chat receipt settlement failed", job_id, exc_info=True)
+    return settled
