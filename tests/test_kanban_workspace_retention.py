@@ -112,7 +112,7 @@ def test_candidate_nested_in_active_worktree_fails_closed(tmp_path):
 
 def test_root_default_board_is_planned(tmp_path):
     """The default board lives at <home>/kanban.db, not under boards/; its cards must be planned too."""
-    workspace, boards = setup(tmp_path)
+    _workspace, boards = setup(tmp_path)
     root_db = tmp_path / "kanban.db"
     (boards / "test" / "kanban.db").rename(root_db)
     rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set(), extra_dbs=[root_db])
@@ -361,7 +361,7 @@ def test_main_apply_reports_free_space_and_archives(tmp_path, capsys):
 
 
 def test_floor_alert_exit_code_when_still_low(tmp_path, capsys):
-    ws, boards = make_repo_workspace(tmp_path, age=5)
+    _ws, boards = make_repo_workspace(tmp_path, age=5)
     home = tmp_path / "home"
     (home / "kanban").mkdir(parents=True)
     (home / "kanban" / "boards").symlink_to(boards)
@@ -434,7 +434,7 @@ def test_declared_path_outside_workspace_roots_is_kept(tmp_path):
 
 
 def test_workspace_root_itself_is_never_a_target(tmp_path):
-    ws, boards = make_repo_workspace(tmp_path, age=5)
+    _ws, boards = make_repo_workspace(tmp_path, age=5)
     with sqlite3.connect(boards / "b" / "kanban.db") as c:
         c.execute("UPDATE tasks SET workspace_path=?", (str(tmp_path / "workspaces"),))
     rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
@@ -500,7 +500,7 @@ def test_live_card_nested_inside_done_workspace_keeps_parent(tmp_path):
 
 
 def test_live_card_on_ancestor_keeps_child(tmp_path):
-    ws, boards = make_repo_workspace(tmp_path, age=5)
+    _ws, boards = make_repo_workspace(tmp_path, age=5)
     with sqlite3.connect(boards / "b" / "kanban.db") as c:
         c.execute("INSERT INTO tasks VALUES (?,?,?,?)", ("task-up", "ready", str(tmp_path / "workspaces"), "dir"))
     rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
