@@ -80,7 +80,7 @@ def test_unsuccessful_receipt_surfaces_a_delivery_failure(run, status):
     assert row["delivery_outcome"] == "failed"
 
 
-def test_later_run_is_never_rewritten_by_an_earlier_receipt(run, monkeypatch):
+def test_job_record_is_not_rewritten_when_it_names_another_delivery(run, monkeypatch):
     job, authority = run
     (key,) = authority.records
     authority.publish(key, status="settled", reply="done")
@@ -90,5 +90,45 @@ def test_later_run_is_never_rewritten_by_an_earlier_receipt(run, monkeypatch):
     _tick_housekeeping()
 
     saved, row = _state(job)
+    # The ledger row settles from its own receipt; the job record names another delivery, so stays.
     assert saved["last_status"] == "delivery_queued" and saved["last_delivery_queued"]
-    assert row["delivery_outcome"] == "queued"
+    assert row["delivery_outcome"] == "delivered"
+
+
+def test_earlier_run_settles_after_a_later_run_started(run, monkeypatch):
+    """A receipt that settles after the next run began must still settle its own ledger row."""
+    job, authority = run
+    (key1,) = authority.records
+    first = executions.latest_execution(job["id"])
+    # Run 2 starts while receipt 1 is still pending.
+    scheduler.run_one_job(jobs.get_job(job["id"]))
+    scheduler.drain_delivery_queue({}, None)
+    second = executions.latest_execution(job["id"])
+    assert second["id"] != first["id"]
+    (key2,) = [k for k in authority.records if k != key1]
+    authority.publish(key1, status="settled", reply="one")
+    authority.publish(key2, status="failed", error="owner refused")
+
+    _tick_housekeeping()
+
+    assert executions.get_execution(first["id"])["delivery_outcome"] == "delivered"
+    assert executions.get_execution(second["id"])["delivery_outcome"] == "failed"
+    saved = jobs.get_job(job["id"])
+    assert saved["last_status"] == "delivery_failed"
+    assert "owner refused" in saved["last_delivery_error"]
+
+
+def test_earlier_run_settles_even_when_latest_is_pending(run):
+    job, authority = run
+    (key1,) = authority.records
+    first = executions.latest_execution(job["id"])
+    scheduler.run_one_job(jobs.get_job(job["id"]))
+    scheduler.drain_delivery_queue({}, None)
+    second = executions.latest_execution(job["id"])
+    authority.publish(key1, status="settled", reply="one")
+
+    _tick_housekeeping()
+
+    assert executions.get_execution(first["id"])["delivery_outcome"] == "delivered"
+    assert executions.get_execution(second["id"])["delivery_outcome"] == "queued"
+    assert jobs.get_job(job["id"])["last_status"] == "delivery_queued"
