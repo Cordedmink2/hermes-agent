@@ -34,6 +34,9 @@ RETENTION_SECONDS = IDLE_SECONDS  # backwards-compatible alias
 MIN_FREE_BYTES = 12 * 10**9
 DAILY_HOUR = 3
 PRESSURE_THROTTLE_SECONDS = 30 * 60
+ALERT_STABLE_WIDTH = 220  # > the scheduler's 200-char incident-signature window
+ALERT_STABLE_PREFIX = ("kanban retention: / below pressure floor after retention; "
+                       "manual reclaim needed (docker images, caches, blocked-card workspaces). ")
 STATE_FILE = DEFAULT_HOME / "kanban" / "reports" / "retention" / "state.json"
 REGENERABLE_NAMES = {".gitignore", ".keep", "README.md"}
 
@@ -277,7 +280,7 @@ def _live_refs(refs: list) -> list[str]:
     return live
 
 
-def execute(rows: list[dict], archive_root: Path, apply: bool = False) -> list[dict]:
+def execute(rows: list[dict], archive_root: Path, apply: bool = False, emit=print) -> list[dict]:
     for row in rows:
         if apply and row["action"] in {"archive", "delete"}:
             src = Path(row["source"])
@@ -285,7 +288,7 @@ def execute(rows: list[dict], archive_root: Path, apply: bool = False) -> list[d
             live = _live_refs(row.get("refs", []))
             if live:
                 row["action"], row["reason"] = "keep", f"card reopened before action: {live}"
-                print(json.dumps(row, sort_keys=True))
+                emit(json.dumps(row, sort_keys=True))
                 continue
             try:
                 if planned == "archive":
@@ -302,7 +305,7 @@ def execute(rows: list[dict], archive_root: Path, apply: bool = False) -> list[d
                     row["action"] = "deleted"
             except Exception as exc:  # one bad workspace must not stop the rest
                 row["action"], row["error"] = f"{planned}_failed", f"{type(exc).__name__}: {exc}"
-        print(json.dumps(row, sort_keys=True))
+        emit(json.dumps(row, sort_keys=True))
     return rows
 
 
@@ -341,6 +344,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-file", type=Path)
     parser.add_argument("--min-free-gb", type=float, default=MIN_FREE_BYTES / 10**9)
     parser.add_argument("--free-path", type=Path, default=Path("/"))
+    parser.add_argument("--report-dir", type=Path,
+                        help="write the JSONL plan and summary to a timestamped file here; stdout/stderr then "
+                             "carry only a stable one-line alert (or a one-line summary)")
     parser.add_argument("--summary", action="store_true", help="print before/after free space and archives")
     args = parser.parse_args(argv)
     floor = int(args.min_free_gb * 10**9)
@@ -354,7 +360,9 @@ def main(argv: list[str] | None = None) -> int:
     root = args.workspace_root or args.home / "kanban" / "workspaces"
     rows = plan(root, args.home / "kanban" / "boards", extra_dbs=[args.home / "kanban.db"],
                 idle_seconds=args.idle_days * 86400)
-    execute(rows, args.archive_root, args.apply)
+    report_lines: list[str] = []
+    emit = report_lines.append if args.report_dir else print
+    execute(rows, args.archive_root, args.apply, emit=emit)
     free_after = shutil.disk_usage(args.free_path).free
     failed = [r for r in rows if r["action"].endswith("_failed")]
     if args.auto and args.apply:
@@ -363,19 +371,33 @@ def main(argv: list[str] | None = None) -> int:
         counts: dict[str, int] = {}
         for r in rows:
             counts[r["action"]] = counts.get(r["action"], 0) + 1
-        print(f"retention {'APPLY' if args.apply else 'DRY-RUN'}"
-              + (f" trigger={trigger}" if trigger else "") + f" idle>={args.idle_days:g}d")
-        print("plan: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+        emit(f"retention {'APPLY' if args.apply else 'DRY-RUN'}"
+             + (f" trigger={trigger}" if trigger else "") + f" idle>={args.idle_days:g}d")
+        emit("plan: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
         for r in rows:
             if r.get("archive"):
-                print(f"archive: {r['archive']} sha256={r['archive_sha256']}")
+                emit(f"archive: {r['archive']} sha256={r['archive_sha256']}")
             if r.get("error"):
-                print(f"FAILED {r['task_id']}: {r['error']}")
-        print(f"free before: {free_before / 10**9:.2f} GB, free after: {free_after / 10**9:.2f} GB (floor {floor / 10**9:g} GB)")
+                emit(f"FAILED {r['task_id']}: {r['error']}")
+        figures = (f"free before: {free_before / 10**9:.2f} GB, free after: {free_after / 10**9:.2f} GB "
+                   f"(floor {floor / 10**9:g} GB)")
+        emit(f"{figures}")
+        report_path = None
+        if args.report_dir:
+            args.report_dir.mkdir(parents=True, exist_ok=True)
+            report_path = args.report_dir / time.strftime("retention-%Y%m%d-%H%M%S.jsonl")
+            report_path.write_text("\n".join(report_lines) + "\n")
         if free_after < floor:
-            print(f"ALERT: root free space {free_after / 10**9:.2f} GB is below the {floor / 10**9:g} GB floor "
-                  "after retention; manual reclaim needed", file=sys.stderr)
+            if args.report_dir:
+                # The scheduler dedupes incidents on the first 200 chars: keep them free of figures/paths.
+                print(ALERT_STABLE_PREFIX.ljust(ALERT_STABLE_WIDTH) + f"{figures}; report: {report_path}",
+                      file=sys.stderr)
+            else:
+                print(f"ALERT: root free space {free_after / 10**9:.2f} GB is below the {floor / 10**9:g} GB floor "
+                      "after retention; manual reclaim needed", file=sys.stderr)
             return 2
+        if args.report_dir:
+            print(figures + f"; report: {report_path}")
     return 1 if failed else 0
 
 

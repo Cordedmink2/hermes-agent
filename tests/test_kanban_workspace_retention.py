@@ -1,4 +1,5 @@
 import importlib.util
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -354,7 +355,7 @@ def test_main_apply_reports_free_space_and_archives(tmp_path, capsys):
     (home / "kanban" / "boards").symlink_to(boards)
     (home / "kanban" / "workspaces").symlink_to(tmp_path / "workspaces")
     rc = retention.main(["--home", str(home), "--archive-root", str(tmp_path / "arch"), "--apply",
-                         "--summary"])
+                         "--summary", "--min-free-gb", "0"])
     out = capsys.readouterr().out
     assert rc == 0 and not ws.exists()
     assert "free before" in out and "free after" in out and "task-1.tar" in out and "archived" in out
@@ -517,3 +518,34 @@ def test_reopened_dir_kind_card_between_plan_and_apply_keeps(tmp_path):
         c.execute("UPDATE tasks SET status='running' WHERE id='task-dir'")
     retention.execute(rows, tmp_path / "arch", apply=True)
     assert ws.exists()
+
+
+def _low_space_run(tmp_path, capsys, free_bytes, monkeypatch):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _ws, boards = make_repo_workspace(tmp_path, age=5)
+    home = tmp_path / "home"
+    (home / "kanban").mkdir(parents=True, exist_ok=True)
+    if not (home / "kanban" / "boards").exists():
+        (home / "kanban" / "boards").symlink_to(boards)
+        (home / "kanban" / "workspaces").symlink_to(tmp_path / "workspaces")
+    usage = type(shutil.disk_usage("/"))(total=10**11, used=10**11 - free_bytes, free=free_bytes)
+    monkeypatch.setattr(retention.shutil, "disk_usage", lambda _p: usage)
+    rc = retention.main(["--home", str(home), "--archive-root", str(tmp_path / "a"), "--apply", "--summary",
+                         "--report-dir", str(tmp_path / "reports")])
+    return rc, capsys.readouterr()
+
+
+def test_alert_signature_stable_across_free_space_figures(tmp_path, capsys, monkeypatch):
+    rc1, o1 = _low_space_run(tmp_path / "x", capsys, 10_980_000_000, monkeypatch)
+    rc2, o2 = _low_space_run(tmp_path / "y", capsys, 11_420_000_000, monkeypatch)
+    assert rc1 == rc2 == 2
+    assert o1.err[:200] == o2.err[:200]
+    assert o1.err.startswith("kanban retention: / below pressure floor")
+    assert "10.98" in o1.err and "11.42" in o2.err and "10.98" not in o1.err[:200]
+    assert o1.out == "" and o2.out == ""  # bulky JSONL goes to the report file, not stdout
+
+
+def test_report_dir_holds_jsonl_plan(tmp_path, capsys, monkeypatch):
+    _rc, _o = _low_space_run(tmp_path, capsys, 10_000_000_000, monkeypatch)
+    files = list((tmp_path / "reports").glob("retention-*.jsonl"))
+    assert len(files) == 1 and '"task_id"' in files[0].read_text()
