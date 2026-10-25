@@ -369,3 +369,111 @@ def test_floor_alert_exit_code_when_still_low(tmp_path, capsys):
     rc = retention.main(["--home", str(home), "--archive-root", str(tmp_path / "a"), "--apply", "--summary",
                          "--min-free-gb", "99999999"])
     assert rc == 2 and "ALERT" in capsys.readouterr().err
+
+
+# ---- review round 1 blockers (B1-B3) and warnings (W1, W2) ----
+
+def test_detached_head_only_commit_is_archived_not_deleted(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    git("checkout", "-q", "--detach", cwd=ws)
+    (ws / "c.txt").write_text("detached work")
+    git("add", ".", cwd=ws)
+    git("commit", "-qm", "detached only", cwd=ws)
+    age_tree(ws, 5)
+    row = plan_one(tmp_path, boards)
+    assert row["action"] == "archive" and row["unpushed_commits"] is True
+
+
+def test_tag_only_commit_is_archived(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    git("checkout", "-q", "--detach", cwd=ws)
+    (ws / "c.txt").write_text("x")
+    git("add", ".", cwd=ws)
+    git("commit", "-qm", "tagged", cwd=ws)
+    git("tag", "keepme", cwd=ws)
+    git("checkout", "-q", "main", cwd=ws)
+    age_tree(ws, 5)
+    assert plan_one(tmp_path, boards)["action"] == "archive"
+
+
+def test_shared_workspace_with_live_card_is_kept(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("INSERT INTO tasks VALUES (?,?,?,?)", ("task-2", "running", str(ws), "scratch"))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert len(rows) == 1 and rows[0]["action"] == "keep"
+    assert "shared" in rows[0]["reason"]
+
+
+def test_shared_workspace_all_terminal_is_one_row(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("INSERT INTO tasks VALUES (?,?,?,?)", ("task-2", "archived", str(ws), "scratch"))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert len(rows) == 1 and rows[0]["action"] == "delete"
+
+
+def test_shared_workspace_live_card_on_other_board_is_kept(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    (boards / "c").mkdir()
+    with sqlite3.connect(boards / "c" / "kanban.db") as c:
+        c.execute("CREATE TABLE tasks (id TEXT,status TEXT,workspace_path TEXT,workspace_kind TEXT)")
+        c.execute("INSERT INTO tasks VALUES (?,?,?,?)", ("task-9", "blocked", str(ws), "scratch"))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert [r["action"] for r in rows] == ["keep"]
+
+
+def test_declared_path_outside_workspace_roots_is_kept(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    outside = tmp_path / "home_repo"
+    ws.rename(outside)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("UPDATE tasks SET workspace_path=?", (str(outside),))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert [r["action"] for r in rows] == ["keep"] and "outside" in rows[0]["reason"]
+
+
+def test_workspace_root_itself_is_never_a_target(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("UPDATE tasks SET workspace_path=?", (str(tmp_path / "workspaces"),))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert all(r["action"] == "keep" for r in rows)
+
+
+def test_board_scoped_workspace_root_is_contained(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    scoped = boards / "b" / "workspaces" / "task-1"
+    scoped.parent.mkdir()
+    ws.rename(scoped)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("UPDATE tasks SET workspace_path=?", (str(scoped),))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert [r["action"] for r in rows] == ["delete"]
+
+
+def test_ignored_env_file_in_clean_repo_is_archived(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    (ws / ".git" / "info" / "exclude").write_text("secret.env\n")
+    (ws / "secret.env").write_text("x")
+    age_tree(ws, 5)
+    assert plan_one(tmp_path, boards)["action"] == "archive"
+
+
+def test_ignored_cache_dir_alone_is_still_deleted(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    (ws / ".git" / "info" / "exclude").write_text("node_modules/\n")
+    (ws / "node_modules").mkdir()
+    (ws / "node_modules" / "x.js").write_text("x")
+    age_tree(ws, 5)
+    assert plan_one(tmp_path, boards)["action"] == "delete"
+
+
+def test_card_reopened_between_plan_and_apply_is_not_removed(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert rows[0]["action"] == "delete"
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("UPDATE tasks SET status='ready'")
+    out = retention.execute(rows, tmp_path / "arch", apply=True)
+    assert out[0]["action"] == "keep" and ws.exists()

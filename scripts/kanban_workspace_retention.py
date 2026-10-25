@@ -73,6 +73,15 @@ def _git(path: Path, *args: str) -> subprocess.CompletedProcess | str:
     return res
 
 
+CACHE_DIRS = {"node_modules", "__pycache__", ".venv", "venv", ".pytest_cache", ".mypy_cache",
+              ".ruff_cache", ".cache", ".tox", "dist", "build", "target"}
+
+
+def _is_cache_path(rel: str) -> bool:
+    """Ignored paths that are regenerable caches; any other ignored file (.env, local state) is kept."""
+    return any(part in CACHE_DIRS for part in Path(rel.strip().strip('"')).parts)
+
+
 def _git_state(path: Path) -> tuple[bool, bool, str | None]:
     """(unpushed, dirty, error). dirty = uncommitted/untracked changes or a stash."""
     if not (path / ".git").exists():
@@ -81,16 +90,19 @@ def _git_state(path: Path) -> tuple[bool, bool, str | None]:
         res = _git(path, *args)
         if isinstance(res, str):
             return False, False, res
-    log = _git(path, "log", "--branches", "--not", "--remotes", "--oneline")
+    # --all covers branches, tags, stash refs and detached HEAD; HEAD is explicit for safety.
+    log = _git(path, "log", "--all", "HEAD", "--not", "--remotes", "--oneline")
     if isinstance(log, str):
         return False, False, log
-    status = _git(path, "status", "--porcelain", "--untracked-files=all")
+    status = _git(path, "status", "--porcelain", "--untracked-files=all", "--ignored")
     if isinstance(status, str):
         return False, False, status
+    status_lines = [ln for ln in status.stdout.splitlines()
+                    if not (ln.startswith("!! ") and _is_cache_path(ln[3:]))]
     stash = _git(path, "stash", "list")
     if isinstance(stash, str):
         return False, False, stash
-    return bool(log.stdout.strip()), bool(status.stdout.strip() or stash.stdout.strip()), None
+    return bool(log.stdout.strip()), bool(status_lines or stash.stdout.strip()), None
 
 
 def _unpushed_commits(path: Path) -> tuple[bool, str | None]:
@@ -138,6 +150,10 @@ def plan(workspace_root: Path, board_root: Path, now: float | None = None,
             protected, worktree_error = set(), detail
     result = []
     dbs = [p for p in (extra_dbs or []) if p.is_file()] + sorted(board_root.glob("*/kanban.db"))
+    roots = {workspace_root.resolve(), *(d.parent.resolve() / "workspaces" for d in dbs)}
+    roots |= {b.resolve() for b in board_root.glob("*/workspaces")}
+    # Pass 1: every card referencing each resolved path, across all boards.
+    groups: dict[Path, list[tuple[str, str, Path]]] = {}
     for db in dbs:
         try:
             with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
@@ -148,34 +164,46 @@ def plan(workspace_root: Path, board_root: Path, now: float | None = None,
             path = Path(declared).expanduser() if declared else workspace_root / task_id
             if not path.exists() or not path.is_dir():
                 continue
-            path = path.resolve()
-            files, size = _inventory(path)
-            newest = _newest_mtime(path)
-            age_days = (now - newest) / 86400
-            active = any(path == wt or path in wt.parents or wt in path.parents for wt in protected)
-            unpushed, dirty, git_error = _git_state(path)
-            regenerable = _only_regenerable(path)
-            if status not in {"done", "archived"}:
-                action, reason = "keep", f"card status is {status}, not done/archived"
-            elif worktree_error:
-                action, reason = "keep", f"cannot read active git worktrees: {worktree_error}"
-            elif active:
-                action, reason = "keep", "workspace is an active git worktree"
-            elif now - newest < idle_seconds:
-                action, reason = "keep", f"workspace idle for {age_days:.2f} days, need {idle_seconds / 86400:g}"
-            elif git_error:
-                action, reason = "keep", f"cannot safely classify git state; git probe error: {git_error}"
-            elif unpushed or dirty:
-                action, reason = "archive", f"terminal and idle >= {idle_seconds / 86400:g} days; " + (
-                    "has unpushed commits" if unpushed else "has uncommitted/untracked changes or stash")
-            elif not _is_git(path) and not regenerable:
-                action, reason = "archive", f"terminal and idle >= {idle_seconds / 86400:g} days; not a git repo with non-regenerable content"
-            else:
-                action, reason = "delete", (f"terminal and idle >= {idle_seconds / 86400:g} days; "
-                                            "no unpushed commits" + ("" if _is_git(path) else " and only allowlisted regenerable content"))
-            result.append({"task_id": task_id, "source": str(path), "action": action, "reason": reason,
-                           "file_count": files, "bytes": size, "unpushed_commits": unpushed,
-                           "only_regenerable": regenerable, "dirty": dirty, "git_probe_error": git_error})
+            groups.setdefault(path.resolve(), []).append((task_id, status, db))
+    # Pass 2: one decision per path, gated on all referencing cards.
+    for path, refs in groups.items():
+        statuses = sorted({st for _t, st, _d in refs})
+        terminal = [t for t, st, _d in refs if st in {"done", "archived"}]
+        task_id = (terminal or [refs[0][0]])[0]
+        status = "done" if not [st for st in statuses if st not in {"done", "archived"}] else \
+            next(st for st in statuses if st not in {"done", "archived"})
+        files, size = _inventory(path)
+        newest = _newest_mtime(path)
+        age_days = (now - newest) / 86400
+        active = any(path == wt or path in wt.parents or wt in path.parents for wt in protected)
+        contained = any(path != r and r in path.parents for r in roots)
+        unpushed, dirty, git_error = _git_state(path)
+        regenerable = _only_regenerable(path)
+        if not contained:
+            action, reason = "keep", "workspace is outside the kanban workspace roots; not managed by retention"
+        elif status not in {"done", "archived"}:
+            action, reason = "keep", f"card status is {status}, not done/archived" + (
+                f" (workspace shared by {len(refs)} cards)" if len(refs) > 1 else "")
+        elif worktree_error:
+            action, reason = "keep", f"cannot read active git worktrees: {worktree_error}"
+        elif active:
+            action, reason = "keep", "workspace is an active git worktree"
+        elif now - newest < idle_seconds:
+            action, reason = "keep", f"workspace idle for {age_days:.2f} days, need {idle_seconds / 86400:g}"
+        elif git_error:
+            action, reason = "keep", f"cannot safely classify git state; git probe error: {git_error}"
+        elif unpushed or dirty:
+            action, reason = "archive", f"terminal and idle >= {idle_seconds / 86400:g} days; " + (
+                "has unpushed commits" if unpushed else "has uncommitted/untracked/ignored changes or stash")
+        elif not _is_git(path) and not regenerable:
+            action, reason = "archive", f"terminal and idle >= {idle_seconds / 86400:g} days; not a git repo with non-regenerable content"
+        else:
+            action, reason = "delete", (f"terminal and idle >= {idle_seconds / 86400:g} days; "
+                                        "no unpushed commits" + ("" if _is_git(path) else " and only allowlisted regenerable content"))
+        result.append({"task_id": task_id, "source": str(path), "action": action, "reason": reason,
+                       "file_count": files, "bytes": size, "unpushed_commits": unpushed,
+                       "only_regenerable": regenerable, "dirty": dirty, "git_probe_error": git_error,
+                       "refs": [[t, str(d)] for t, _s, d in refs]})
     return result
 
 
@@ -223,11 +251,31 @@ def _archive(src: Path, archive_root: Path, task_id: str) -> tuple[Path, str] | 
         tmp.unlink(missing_ok=True)
 
 
+def _live_refs(refs: list) -> list[str]:
+    """Re-read card status right before acting (a card may have been reopened mid-run)."""
+    live = []
+    for task_id, db in refs:
+        try:
+            with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+                row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        except sqlite3.Error:
+            live.append(f"{task_id}: status unreadable")
+            continue
+        if row and row[0] not in {"done", "archived"}:
+            live.append(f"{task_id}={row[0]}")
+    return live
+
+
 def execute(rows: list[dict], archive_root: Path, apply: bool = False) -> list[dict]:
     for row in rows:
         if apply and row["action"] in {"archive", "delete"}:
             src = Path(row["source"])
             planned = row["action"]
+            live = _live_refs(row.get("refs", []))
+            if live:
+                row["action"], row["reason"] = "keep", f"card reopened before action: {live}"
+                print(json.dumps(row, sort_keys=True))
+                continue
             try:
                 if planned == "archive":
                     done = _archive(src, archive_root, row["task_id"])
