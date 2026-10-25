@@ -34,9 +34,15 @@ RETENTION_SECONDS = IDLE_SECONDS  # backwards-compatible alias
 MIN_FREE_BYTES = 12 * 10**9
 DAILY_HOUR = 3
 PRESSURE_THROTTLE_SECONDS = 30 * 60
-ALERT_STABLE_WIDTH = 220  # > the scheduler's 200-char incident-signature window
-ALERT_STABLE_PREFIX = ("kanban retention: / below pressure floor after retention; "
-                       "manual reclaim needed (docker images, caches, blocked-card workspaces). ")
+REPORT_KEEP = 48  # keep the newest N retention-*.jsonl reports (~1 day at the 30-min pressure cadence)
+# The scheduler's incident signature is sha256(job + normalised error)[:200 chars], where normalisation collapses
+# whitespace, lowercases and is preceded by "script exited with code 2 stderr: " (34 chars). The leading text of the
+# alert must therefore be fixed prose of >= 170 normalised chars; figures/paths go only after it. No padding.
+ALERT_STABLE_PREFIX = (
+    "kanban retention: / is still below the pressure floor after workspace retention; manual reclaim is needed "
+    "(docker images, build caches, blocked-card workspaces, old archives). The free-space figures and the full plan "
+    "are in the report file named at the end of this message and are deliberately kept out of this leading text "
+    "so that repeat alerts share one incident. ")
 STATE_FILE = DEFAULT_HOME / "kanban" / "reports" / "retention" / "state.json"
 REGENERABLE_NAMES = {".gitignore", ".keep", "README.md"}
 
@@ -280,6 +286,18 @@ def _live_refs(refs: list) -> list[str]:
     return live
 
 
+def prune_reports(report_dir: Path, keep: int) -> list[Path]:
+    """Delete all but the newest `keep` retention-*.jsonl files (names sort chronologically)."""
+    files = sorted(report_dir.glob("retention-*.jsonl"))
+    old = files[:-keep] if keep > 0 else files
+    for f in old:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return old
+
+
 def execute(rows: list[dict], archive_root: Path, apply: bool = False, emit=print) -> list[dict]:
     for row in rows:
         if apply and row["action"] in {"archive", "delete"}:
@@ -367,7 +385,9 @@ def main(argv: list[str] | None = None) -> int:
     failed = [r for r in rows if r["action"].endswith("_failed")]
     if args.auto and args.apply:
         record_run(state_file, time.time())
-    if args.summary or args.auto:
+    figures = (f"free before: {free_before / 10**9:.2f} GB, free after: {free_after / 10**9:.2f} GB "
+               f"(floor {floor / 10**9:g} GB)")
+    if args.summary or args.auto or args.report_dir:
         counts: dict[str, int] = {}
         for r in rows:
             counts[r["action"]] = counts.get(r["action"], 0) + 1
@@ -379,19 +399,17 @@ def main(argv: list[str] | None = None) -> int:
                 emit(f"archive: {r['archive']} sha256={r['archive_sha256']}")
             if r.get("error"):
                 emit(f"FAILED {r['task_id']}: {r['error']}")
-        figures = (f"free before: {free_before / 10**9:.2f} GB, free after: {free_after / 10**9:.2f} GB "
-                   f"(floor {floor / 10**9:g} GB)")
-        emit(f"{figures}")
-        report_path = None
-        if args.report_dir:
-            args.report_dir.mkdir(parents=True, exist_ok=True)
-            report_path = args.report_dir / time.strftime("retention-%Y%m%d-%H%M%S.jsonl")
-            report_path.write_text("\n".join(report_lines) + "\n")
+        emit(figures)
+    report_path = None
+    if args.report_dir:  # always written when the flag is given, regardless of --summary/--auto
+        args.report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = args.report_dir / time.strftime("retention-%Y%m%d-%H%M%S.jsonl")
+        report_path.write_text("\n".join(report_lines) + "\n")
+        prune_reports(args.report_dir, REPORT_KEEP)
+    if args.summary or args.auto or args.report_dir:
         if free_after < floor:
             if args.report_dir:
-                # The scheduler dedupes incidents on the first 200 chars: keep them free of figures/paths.
-                print(ALERT_STABLE_PREFIX.ljust(ALERT_STABLE_WIDTH) + f"{figures}; report: {report_path}",
-                      file=sys.stderr)
+                print(ALERT_STABLE_PREFIX + f"{figures}; report: {report_path}", file=sys.stderr)
             else:
                 print(f"ALERT: root free space {free_after / 10**9:.2f} GB is below the {floor / 10**9:g} GB floor "
                       "after retention; manual reclaim needed", file=sys.stderr)

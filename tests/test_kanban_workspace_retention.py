@@ -535,14 +535,48 @@ def _low_space_run(tmp_path, capsys, free_bytes, monkeypatch):
     return rc, capsys.readouterr()
 
 
+def _scheduler_error(stderr: str) -> str:
+    # exactly as cron/scheduler_script.py builds it for a non-zero script exit
+    return f"Script exited with code 2\nstderr:\n{stderr.strip()}"
+
+
 def test_alert_signature_stable_across_free_space_figures(tmp_path, capsys, monkeypatch):
+    from cron.incidents import _error_signature, _normalize_error
+
     rc1, o1 = _low_space_run(tmp_path / "x", capsys, 10_980_000_000, monkeypatch)
     rc2, o2 = _low_space_run(tmp_path / "y", capsys, 11_420_000_000, monkeypatch)
     assert rc1 == rc2 == 2
-    assert o1.err[:200] == o2.err[:200]
-    assert o1.err.startswith("kanban retention: / below pressure floor")
-    assert "10.98" in o1.err and "11.42" in o2.err and "10.98" not in o1.err[:200]
+    e1, e2 = _scheduler_error(o1.err), _scheduler_error(o2.err)
+    assert "10.98" in e1 and "11.42" in e2  # figures still reach the operator, just not the signature window
+    assert _error_signature("3482a077cd5c", e1) == _error_signature("3482a077cd5c", e2)
+    window = _normalize_error(e1)[:200]
+    assert len(window) == 200  # the fixed prose alone fills the whole signature window
+    assert not any(ch.isdigit() for ch in window.replace("code 2", ""))
+    assert "free before" not in window and str(tmp_path) not in window
     assert o1.out == "" and o2.out == ""  # bulky JSONL goes to the report file, not stdout
+
+
+def test_report_dir_without_summary_still_writes_report(tmp_path, capsys, monkeypatch):
+    _ws, boards = make_repo_workspace(tmp_path, age=5)
+    home = tmp_path / "home"
+    (home / "kanban").mkdir(parents=True)
+    (home / "kanban" / "boards").symlink_to(boards)
+    (home / "kanban" / "workspaces").symlink_to(tmp_path / "workspaces")
+    rc = retention.main(["--home", str(home), "--archive-root", str(tmp_path / "a"),
+                         "--report-dir", str(tmp_path / "reports")])
+    assert rc in (0, 2)
+    files = list((tmp_path / "reports").glob("retention-*.jsonl"))
+    assert len(files) == 1 and '"task_id"' in files[0].read_text()
+
+
+def test_prune_reports_keeps_newest_n(tmp_path):
+    for i in range(7):
+        (tmp_path / f"retention-20261025-0000{i:02d}.jsonl").write_text("x")
+    (tmp_path / "other.txt").write_text("keep")
+    removed = retention.prune_reports(tmp_path, 3)
+    left = sorted(p.name for p in tmp_path.glob("retention-*.jsonl"))
+    assert len(removed) == 4 and left == [f"retention-20261025-0000{i:02d}.jsonl" for i in (4, 5, 6)]
+    assert (tmp_path / "other.txt").exists()
 
 
 def test_report_dir_holds_jsonl_plan(tmp_path, capsys, monkeypatch):
