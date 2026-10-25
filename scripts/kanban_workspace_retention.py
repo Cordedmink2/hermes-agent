@@ -152,24 +152,35 @@ def plan(workspace_root: Path, board_root: Path, now: float | None = None,
     dbs = [p for p in (extra_dbs or []) if p.is_file()] + sorted(board_root.glob("*/kanban.db"))
     roots = {workspace_root.resolve(), *(d.parent.resolve() / "workspaces" for d in dbs)}
     roots |= {b.resolve() for b in board_root.glob("*/workspaces")}
-    # Pass 1: every card referencing each resolved path, across all boards.
+    # Pass 1: every card of ANY kind referencing a path, across all boards.
+    # Only scratch-kind rows are candidates; all rows gate.
     groups: dict[Path, list[tuple[str, str, Path]]] = {}
+    allrefs: list[tuple[str, str, Path, Path]] = []
     for db in dbs:
         try:
             with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
-                tasks = conn.execute("SELECT id,status,workspace_path FROM tasks WHERE workspace_kind='scratch'").fetchall()
+                tasks = conn.execute("SELECT id,status,workspace_path,workspace_kind FROM tasks").fetchall()
         except sqlite3.Error:
             continue
-        for task_id, status, declared in tasks:
-            path = Path(declared).expanduser() if declared else workspace_root / task_id
-            if not path.exists() or not path.is_dir():
+        for task_id, status, declared, kind in tasks:
+            if declared:
+                path = Path(declared).expanduser()
+            elif kind == "scratch":
+                path = workspace_root / task_id
+            else:
                 continue
-            groups.setdefault(path.resolve(), []).append((task_id, status, db))
-    # Pass 2: one decision per path, gated on all referencing cards.
-    for path, refs in groups.items():
+            allrefs.append((task_id, status, path.resolve(), db))
+            if kind == "scratch" and path.exists() and path.is_dir():
+                groups.setdefault(path.resolve(), []).append((task_id, status, db))
+    # Pass 2: one decision per path, gated on every card at, above or below it.
+    for path, own in groups.items():
+        refs = list(own)
+        for t, st, rp, d in allrefs:
+            if (t, st, d) not in refs and (rp == path or path in rp.parents or rp in path.parents):
+                refs.append((t, st, d))
         statuses = sorted({st for _t, st, _d in refs})
-        terminal = [t for t, st, _d in refs if st in {"done", "archived"}]
-        task_id = (terminal or [refs[0][0]])[0]
+        terminal = [t for t, st, _d in own if st in {"done", "archived"}]
+        task_id = (terminal or [own[0][0]])[0]
         status = "done" if not [st for st in statuses if st not in {"done", "archived"}] else \
             next(st for st in statuses if st not in {"done", "archived"})
         files, size = _inventory(path)

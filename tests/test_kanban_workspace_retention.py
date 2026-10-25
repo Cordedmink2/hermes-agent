@@ -477,3 +477,43 @@ def test_card_reopened_between_plan_and_apply_is_not_removed(tmp_path):
         c.execute("UPDATE tasks SET status='ready'")
     out = retention.execute(rows, tmp_path / "arch", apply=True)
     assert out[0]["action"] == "keep" and ws.exists()
+
+
+def test_live_dir_kind_card_on_same_path_keeps_scratch_workspace(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("INSERT INTO tasks VALUES (?,?,?,?)", ("task-dir", "running", str(ws), "dir"))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert [r["action"] for r in rows] == ["keep"]
+    # and execute() re-checks that card too
+    for kind in ("worktree", "dir"):
+        retention.execute(rows, tmp_path / "arch", apply=True)
+    assert ws.exists()
+
+
+def test_live_card_nested_inside_done_workspace_keeps_parent(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("INSERT INTO tasks VALUES (?,?,?,?)", ("task-in", "running", str(ws / "sub"), "dir"))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert [r["action"] for r in rows] == ["keep"]
+
+
+def test_live_card_on_ancestor_keeps_child(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("INSERT INTO tasks VALUES (?,?,?,?)", ("task-up", "ready", str(tmp_path / "workspaces"), "dir"))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert [r["action"] for r in rows] == ["keep"]
+
+
+def test_reopened_dir_kind_card_between_plan_and_apply_keeps(tmp_path):
+    ws, boards = make_repo_workspace(tmp_path, age=5)
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("INSERT INTO tasks VALUES (?,?,?,?)", ("task-dir", "done", str(ws), "dir"))
+    rows = retention.plan(tmp_path / "workspaces", boards, active_worktrees=set())
+    assert rows[0]["action"] == "delete"
+    with sqlite3.connect(boards / "b" / "kanban.db") as c:
+        c.execute("UPDATE tasks SET status='running' WHERE id='task-dir'")
+    retention.execute(rows, tmp_path / "arch", apply=True)
+    assert ws.exists()
